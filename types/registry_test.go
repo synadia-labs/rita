@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bruth/rita/codec"
-	"github.com/bruth/rita/internal/pb"
-	"github.com/bruth/rita/testutil"
+	"github.com/synadia-labs/rita/codec"
+	"github.com/synadia-labs/rita/internal/pb"
+	"github.com/synadia-labs/rita/testutil"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

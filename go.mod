@@ -1,4 +1,4 @@
-module github.com/bruth/rita
+module github.com/synadia-labs/rita
 
 go 1.24
 

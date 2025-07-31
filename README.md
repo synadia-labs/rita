@@ -1,31 +1,29 @@
 # Rita
 
-
 Rita is a toolkit of various event-centric and reactive abstractions build on top of [NATS](https://nats.io).
 
 **NOTE: This package is under heavy development, so breaking changes will likely be introduced. Feedback is welcome on API design and scope. Please open an issue if you have something to share!**
 
-
 [![GoDoc][GoDoc-Image]][GoDoc-URL] [![ReportCard][ReportCard-Image]][ReportCard-URL] [![GitHub Actions][GitHubActions-Image]][GitHubActions-URL]
 
-[GoDoc-Image]: https://pkg.go.dev/badge/github.com/bruth/rita
-[GoDoc-URL]: https://pkg.go.dev/github.com/bruth/rita
-[ReportCard-Image]: https://goreportcard.com/badge/github.com/bruth/rita
-[ReportCard-URL]: https://goreportcard.com/report/github.com/bruth/rita
-[GitHubActions-Image]: https://github.com/bruth/rita/actions/workflows/ci.yaml/badge.svg?branch=main
-[GitHubActions-URL]: https://github.com/bruth/rita/actions?query=branch%3Amain
+[GoDoc-Image]: https://pkg.go.dev/badge/github.com/synadia-labs/rita
+[GoDoc-URL]: https://pkg.go.dev/github.com/synadia-labs/rita
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/synadia-labs/rita
+[ReportCard-URL]: https://goreportcard.com/report/github.com/synadia-labs/rita
+[GitHubActions-Image]: https://github.com/synadia-labs/rita/actions/workflows/ci.yaml/badge.svg?branch=main
+[GitHubActions-URL]: https://github.com/synadia-labs/rita/actions?query=branch%3Amain
 
 ## Install
 
-Requires Go 1.18+
+Requires Go 1.24+
 
 ```
-go get github.com/bruth/rita
+go get github.com/synadia-labs/rita
 ```
 
 ## Usage
 
-*See the [blog post](https://www.byronruth.com/implementing-an-event-store-on-nats-part-2/) that introduces the initial design of Rita.*
+_See the [blog post](https://www.byronruth.com/implementing-an-event-store-on-nats-part-2/) that introduces the initial design of Rita._
 
 ### Type Registry
 
@@ -63,7 +61,7 @@ r, err := rita.New(nc, rita.TypeRegistry(tr))
 
 ### EventStore
 
-Create an event store for orders. This will default to a subject of `orders.>`. *Note, other than a few different defaults to follow the semantics of an event store, the stream is just an vanilla JetStream and can be managed as such.*
+Create an event store for orders. This will default to a subject of `orders.>`. _Note, other than a few different defaults to follow the semantics of an event store, the stream is just an vanilla JetStream and can be managed as such._
 
 ```go
 // Get a handle to the event store with a name.
@@ -155,7 +153,7 @@ This will only fetch the events after the last event that was received previousl
 
 ## Planned Features
 
-*Although features are checked off, they are all in a pre-1.0 state and subject to change.*
+_Although features are checked off, they are all in a pre-1.0 state and subject to change._
 
 - [x] type registry
   - transparent mapping from string to type
@@ -181,4 +179,3 @@ This will only fetch the events after the last event that was received previousl
   - use stream with max messages per subject + interest policy
   - each timer or ticker maps to a subject
   - use expected sequence on subject to prevent duplicate instance firing
-

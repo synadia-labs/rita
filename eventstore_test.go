@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/bruth/rita/id"
-	"github.com/bruth/rita/testutil"
-	"github.com/bruth/rita/types"
 	"github.com/nats-io/nats.go"
+	"github.com/synadia-labs/rita/id"
+	"github.com/synadia-labs/rita/testutil"
+	"github.com/synadia-labs/rita/types"
 )
 
 type OrderPlaced struct {

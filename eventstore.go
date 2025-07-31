@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bruth/rita/codec"
 	"github.com/nats-io/nats.go"
+	"github.com/synadia-labs/rita/codec"
 )
 
 const (

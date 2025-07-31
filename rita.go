@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bruth/rita/clock"
-	"github.com/bruth/rita/codec"
-	"github.com/bruth/rita/id"
-	"github.com/bruth/rita/types"
 	"github.com/nats-io/nats.go"
+	"github.com/synadia-labs/rita/clock"
+	"github.com/synadia-labs/rita/codec"
+	"github.com/synadia-labs/rita/id"
+	"github.com/synadia-labs/rita/types"
 )
 
 type ritaOption func(o *Rita) error
