@@ -18,7 +18,7 @@ func (f ritaOption) addOption(o *Rita) error {
 	return f(o)
 }
 
-// RegistryOption models a option when creating a type registry.
+// RitaOption models a option when creating a type registry.
 type RitaOption interface {
 	addOption(o *Rita) error
 }

@@ -21,7 +21,7 @@ func ShutdownNatsServer(s *server.Server) {
 	}
 	s.Shutdown()
 	if sd != "" {
-		os.RemoveAll(sd)
+		_ = os.RemoveAll(sd)
 	}
 	s.WaitForShutdown()
 }
