@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"regexp"
 
-	"github.com/bruth/rita/codec"
+	"github.com/synadia-labs/rita/codec"
 )
 
 var (
