@@ -285,6 +285,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 			return nil, 0, nil
 		}
 		sopts.OptStartSeq = *o.afterSeq
+		sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
 	} else {
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
