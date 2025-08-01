@@ -393,7 +393,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 }
 
 // Create creates the event store given the configuration. The stream
-// name is the name of the store and the subjects default to "{name}}.>".
+// name is the name of the store and the subjects default to "{name}.>".
 func (s *EventStore) Create(config *nats.StreamConfig) error {
 	if config == nil {
 		config = &nats.StreamConfig{}

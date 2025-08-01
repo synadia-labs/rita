@@ -1,7 +1,9 @@
 package rita
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -47,9 +49,18 @@ func ID(id id.ID) RitaOption {
 	})
 }
 
+func Logger(logger *slog.Logger) RitaOption {
+	return ritaOption(func(o *Rita) error {
+		o.logger = logger
+		return nil
+	})
+}
+
 type Rita struct {
-	nc *nats.Conn
-	js nats.JetStreamContext
+	ctx    context.Context
+	logger *slog.Logger
+	nc     *nats.Conn
+	js     nats.JetStreamContext
 
 	id    id.ID
 	clock clock.Clock
@@ -133,13 +144,14 @@ func (r *Rita) EventStore(name string) *EventStore {
 }
 
 // New initializes a new Rita instance with a NATS connection.
-func New(nc *nats.Conn, opts ...RitaOption) (*Rita, error) {
+func New(ctx context.Context, nc *nats.Conn, opts ...RitaOption) (*Rita, error) {
 	js, err := nc.JetStream()
 	if err != nil {
 		return nil, err
 	}
 
 	rt := &Rita{
+		ctx:   ctx,
 		nc:    nc,
 		js:    js,
 		id:    id.NUID,

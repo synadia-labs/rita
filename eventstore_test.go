@@ -42,7 +42,7 @@ func TestEventStoreNoRegistry(t *testing.T) {
 
 	nc, _ := nats.Connect(srv.ClientURL())
 
-	r, err := New(nc)
+	r, err := New(t.Context(), nc)
 	is.NoErr(err)
 
 	es := r.EventStore("orders")
@@ -230,7 +230,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 	})
 	is.NoErr(err)
 
-	r, err := New(nc, TypeRegistry(tr))
+	r, err := New(t.Context(), nc, TypeRegistry(tr))
 	is.NoErr(err)
 
 	for i, test := range tests {
