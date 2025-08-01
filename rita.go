@@ -1,11 +1,14 @@
 package rita
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/clock"
 	"github.com/synadia-labs/rita/codec"
 	"github.com/synadia-labs/rita/id"
@@ -47,9 +50,18 @@ func ID(id id.ID) RitaOption {
 	})
 }
 
+func Logger(logger *slog.Logger) RitaOption {
+	return ritaOption(func(o *Rita) error {
+		o.logger = logger
+		return nil
+	})
+}
+
 type Rita struct {
-	nc *nats.Conn
-	js nats.JetStreamContext
+	ctx    context.Context
+	logger *slog.Logger
+	nc     *nats.Conn
+	js     jetstream.JetStream
 
 	id    id.ID
 	clock clock.Clock
@@ -57,9 +69,9 @@ type Rita struct {
 }
 
 // UnpackEvent unpacks an Event from a NATS message.
-func (r *Rita) UnpackEvent(msg *nats.Msg) (*Event, error) {
-	eventType := msg.Header.Get(eventTypeHdr)
-	codecName := msg.Header.Get(eventCodecHdr)
+func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
+	eventType := msg.Headers().Get(eventTypeHdr)
+	codecName := msg.Headers().Get(eventCodecHdr)
 
 	var (
 		data interface{}
@@ -74,13 +86,13 @@ func (r *Rita) UnpackEvent(msg *nats.Msg) (*Event, error) {
 	// No type registry, so assume byte slice.
 	if r.types == nil {
 		var b []byte
-		err = c.Unmarshal(msg.Data, &b)
+		err = c.Unmarshal(msg.Data(), &b)
 		data = b
 	} else {
 		var v any
 		v, err = r.types.Init(eventType)
 		if err == nil {
-			err = c.Unmarshal(msg.Data, v)
+			err = c.Unmarshal(msg.Data(), v)
 			data = v
 		}
 	}
@@ -92,7 +104,7 @@ func (r *Rita) UnpackEvent(msg *nats.Msg) (*Event, error) {
 	// If this message is not from a native JS subscription, the reply will not
 	// be set. This is where metadata is parsed from. In cases where a message is
 	// re-published, we don't want to fail if we can't get the sequence.
-	if msg.Reply != "" {
+	if msg.Reply() != "" {
 		md, err := msg.Metadata()
 		if err != nil {
 			return nil, fmt.Errorf("unpack: failed to get metadata: %s", err)
@@ -100,27 +112,27 @@ func (r *Rita) UnpackEvent(msg *nats.Msg) (*Event, error) {
 		seq = md.Sequence.Stream
 	}
 
-	eventTime, err := time.Parse(eventTimeFormat, msg.Header.Get(eventTimeHdr))
+	eventTime, err := time.Parse(eventTimeFormat, msg.Headers().Get(eventTimeHdr))
 	if err != nil {
 		return nil, fmt.Errorf("unpack: failed to parse event time: %s", err)
 	}
 
 	meta := make(map[string]string)
 
-	for h := range msg.Header {
+	for h := range msg.Headers() {
 		if strings.HasPrefix(h, eventMetaPrefixHdr) {
 			key := h[len(eventMetaPrefixHdr):]
-			meta[key] = msg.Header.Get(h)
+			meta[key] = msg.Headers().Get(h)
 		}
 	}
 
 	return &Event{
-		ID:       msg.Header.Get(nats.MsgIdHdr),
-		Type:     msg.Header.Get(eventTypeHdr),
+		ID:       msg.Headers().Get(nats.MsgIdHdr),
+		Type:     msg.Headers().Get(eventTypeHdr),
 		Time:     eventTime,
 		Data:     data,
 		Meta:     meta,
-		Subject:  msg.Subject,
+		Subject:  msg.Subject(),
 		Sequence: seq,
 	}, nil
 }
@@ -133,13 +145,14 @@ func (r *Rita) EventStore(name string) *EventStore {
 }
 
 // New initializes a new Rita instance with a NATS connection.
-func New(nc *nats.Conn, opts ...RitaOption) (*Rita, error) {
-	js, err := nc.JetStream()
+func New(ctx context.Context, nc *nats.Conn, opts ...RitaOption) (*Rita, error) {
+	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
 	rt := &Rita{
+		ctx:   ctx,
 		nc:    nc,
 		js:    js,
 		id:    id.NUID,

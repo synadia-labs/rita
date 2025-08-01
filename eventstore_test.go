@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/id"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
@@ -42,12 +43,12 @@ func TestEventStoreNoRegistry(t *testing.T) {
 
 	nc, _ := nats.Connect(srv.ClientURL())
 
-	r, err := New(nc)
+	r, err := New(t.Context(), nc)
 	is.NoErr(err)
 
 	es := r.EventStore("orders")
-	err = es.Create(&nats.StreamConfig{
-		Storage: nats.MemoryStorage,
+	err = es.Create(&jetstream.StreamConfig{
+		Storage: jetstream.MemoryStorage,
 	})
 	is.NoErr(err)
 
@@ -230,7 +231,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 	})
 	is.NoErr(err)
 
-	r, err := New(nc, TypeRegistry(tr))
+	r, err := New(t.Context(), nc, TypeRegistry(tr))
 	is.NoErr(err)
 
 	for i, test := range tests {
@@ -239,8 +240,8 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 			// Recreate the store for each test.
 			_ = es.Delete()
-			err := es.Create(&nats.StreamConfig{
-				Storage: nats.MemoryStorage,
+			err := es.Create(&jetstream.StreamConfig{
+				Storage: jetstream.MemoryStorage,
 			})
 			is.NoErr(err)
 
