@@ -277,19 +277,19 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
-	sopts := jetstream.ConsumerConfig{}
+	sopts := jetstream.OrderedConsumerConfig{}
 
 	// Don't bother creating the consumer if the last seq is smaller than start.
 	if o.afterSeq != nil {
 		if lastMsg.Sequence <= *o.afterSeq {
 			return nil, 0, nil
 		}
-		sopts.DeliverPolicy = jetstream.DeliverLastPolicy
+		sopts.OptStartSeq = *o.afterSeq
 	} else {
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	consumer, err := s.rt.js.CreateConsumer(s.rt.ctx, s.name, jetstream.ConsumerConfig{})
+	consumer, err := s.rt.js.OrderedConsumer(s.rt.ctx, s.name, sopts)
 	if err != nil {
 		return nil, 0, err
 	}
