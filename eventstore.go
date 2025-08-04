@@ -295,8 +295,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 		return nil, 0, err
 	}
 
-	pmopts := []jetstream.PullMessagesOpt{}
-	msgCtx, err := consumer.Messages(pmopts...)
+	msgCtx, err := consumer.Messages()
 	if err != nil {
 		return nil, 0, err
 	}
