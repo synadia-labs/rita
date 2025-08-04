@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -276,29 +277,33 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
-	sopts := []nats.SubOpt{
-		nats.OrderedConsumer(),
-	}
+	sopts := jetstream.OrderedConsumerConfig{}
 
 	// Don't bother creating the consumer if the last seq is smaller than start.
 	if o.afterSeq != nil {
 		if lastMsg.Sequence <= *o.afterSeq {
 			return nil, 0, nil
 		}
-		sopts = append(sopts, nats.StartSequence(*o.afterSeq))
+		sopts.OptStartSeq = *o.afterSeq
+		sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
 	} else {
-		sopts = append(sopts, nats.DeliverAll())
+		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	sub, err := s.rt.js.SubscribeSync(subject, sopts...)
+	consumer, err := s.rt.js.OrderedConsumer(s.rt.ctx, s.name, sopts)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer sub.Unsubscribe() //nolint
+
+	msgCtx, err := consumer.Messages()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer msgCtx.Stop()
 
 	// Skip first.
 	if o.afterSeq != nil {
-		_, err := sub.NextMsgWithContext(ctx)
+		_, err := msgCtx.Next()
 		if err != nil {
 			return nil, 0, err
 		}
@@ -306,7 +311,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 
 	var events []*Event
 	for {
-		msg, err := sub.NextMsgWithContext(ctx)
+		msg, err := msgCtx.Next()
 		if err != nil {
 			return nil, 0, err
 		}
@@ -337,16 +342,15 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 		}
 	}
 
-	var ack *nats.PubAck
+	var ack *jetstream.PubAck
 
 	for i, event := range events {
-		popts := []nats.PubOpt{
-			nats.Context(ctx),
-			nats.ExpectStream(s.name),
+		popts := []jetstream.PublishOpt{
+			jetstream.WithExpectStream(s.name),
 		}
 
 		if i == 0 && o.expSeq != nil {
-			popts = append(popts, nats.ExpectLastSequencePerSubject(*o.expSeq))
+			popts = append(popts, jetstream.WithExpectLastSequencePerSubject(*o.expSeq))
 		}
 
 		e, err := s.wrapEvent(event)
@@ -360,7 +364,7 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 		}
 
 		// TODO: add retry logic in case of intermittent errors?
-		ack, err = s.rt.js.PublishMsg(msg, popts...)
+		ack, err = s.rt.js.PublishMsg(s.rt.ctx, msg, popts...)
 		if err != nil {
 			if strings.Contains(err.Error(), "wrong last sequence") {
 				return 0, ErrSequenceConflict
@@ -393,10 +397,10 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 }
 
 // Create creates the event store given the configuration. The stream
-// name is the name of the store and the subjects default to "{name}}.>".
-func (s *EventStore) Create(config *nats.StreamConfig) error {
+// name is the name of the store and the subjects default to "{name}.>".
+func (s *EventStore) Create(config *jetstream.StreamConfig) error {
 	if config == nil {
-		config = &nats.StreamConfig{}
+		config = &jetstream.StreamConfig{}
 	}
 	config.Name = s.name
 
@@ -404,21 +408,21 @@ func (s *EventStore) Create(config *nats.StreamConfig) error {
 		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
 	}
 
-	_, err := s.rt.js.AddStream(config)
+	_, err := s.rt.js.CreateStream(s.rt.ctx, *config)
 	return err
 }
 
 // Update updates the event store configuration.
-func (s *EventStore) Update(config *nats.StreamConfig) error {
+func (s *EventStore) Update(config *jetstream.StreamConfig) error {
 	if config == nil {
-		config = &nats.StreamConfig{}
+		config = &jetstream.StreamConfig{}
 	}
 	config.Name = s.name
-	_, err := s.rt.js.UpdateStream(config)
+	_, err := s.rt.js.UpdateStream(s.rt.ctx, *config)
 	return err
 }
 
 // Delete deletes the event store.
 func (s *EventStore) Delete() error {
-	return s.rt.js.DeleteStream(s.name)
+	return s.rt.js.DeleteStream(s.rt.ctx, s.name)
 }
