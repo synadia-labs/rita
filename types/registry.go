@@ -131,7 +131,7 @@ func (r *Registry) addType(name string, typ *Type) {
 	r.rtypes[rt.Elem()] = name
 }
 
-// Initialize a value given the registered name of the type.
+// Init a value given the registered name of the type.
 func (r *Registry) Init(t string) (any, error) {
 	x, ok := r.types[t]
 	if !ok {

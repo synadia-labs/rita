@@ -282,10 +282,14 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 	// Don't bother creating the consumer if the last seq is smaller than start.
 	if o.afterSeq != nil {
 		if lastMsg.Sequence <= *o.afterSeq {
-			return nil, 0, nil
+			return nil, lastMsg.Sequence, nil
 		}
-		sopts.OptStartSeq = *o.afterSeq
-		sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		if *o.afterSeq == 0 {
+			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
+		} else {
+			sopts.OptStartSeq = *o.afterSeq
+			sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		}
 	} else {
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
@@ -380,15 +384,16 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 // last event that evolved the state is returned, including when an error
 // occurs.
 func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...LoadOption) (uint64, error) {
-	events, _, err := s.Load(ctx, subject, opts...)
+	events, lastSeq, err := s.Load(ctx, subject, opts...)
 	if err != nil {
 		return 0, err
 	}
 
-	var lastSeq uint64
 	for _, e := range events {
-		if err := model.Evolve(e); err != nil {
-			return lastSeq, err
+		if e.Subject == subject {
+			if err := model.Evolve(e); err != nil {
+				return lastSeq, err
+			}
 		}
 		lastSeq = e.Sequence
 	}
