@@ -124,7 +124,7 @@ func TestEventStoreSnapshot(t *testing.T) {
 
 	ctx := t.Context()
 
-	es, err := r.EventStore("orders", WithSnapshotSettings("snapshots", "orders-snapshot"))
+	es, err := r.EventStore("orders", WithSnapshotSettings("snapshots"))
 	is.NoErr(err)
 	err = es.Create(&jetstream.StreamConfig{
 		Storage: jetstream.MemoryStorage,
@@ -143,7 +143,7 @@ func TestEventStoreSnapshot(t *testing.T) {
 	is.Equal(seq, uint64(4))
 
 	var stats OrderStats
-	seq2, err := es.Evolve(ctx, "orders.*", &stats, WithSnapshot())
+	seq2, err := es.Evolve(ctx, "orders.*", &stats, WithSnapshot("orderstats"))
 	is.NoErr(err)
 	is.Equal(seq, seq2)
 
@@ -160,7 +160,7 @@ func TestEventStoreSnapshot(t *testing.T) {
 	is.NoErr(err)
 
 	loadStats := OrderStats{}
-	seqLoad, err := es.Evolve(ctx, "orders.*", &loadStats, FromSnapshot(0))
+	seqLoad, err := es.Evolve(ctx, "orders.*", &loadStats, FromSnapshot("orderstats", 0))
 	is.NoErr(err)
 	is.Equal(uint64(0), seqLoad)
 

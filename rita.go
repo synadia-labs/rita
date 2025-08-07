@@ -140,13 +140,12 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 
 type EventStoreOption func(*EventStore) error
 
-func WithSnapshotSettings(bucket, key string) EventStoreOption {
+func WithSnapshotSettings(bucket string) EventStoreOption {
 	return func(e *EventStore) error {
-		if bucket == "" || key == "" {
-			return fmt.Errorf("rita: snapshot bucket/key cannot be empty")
+		if bucket == "" {
+			return fmt.Errorf("rita: snapshot bucket cannot be empty")
 		}
 		e.snapshotBucket = bucket
-		e.snapshotKey = key
 		return nil
 	}
 }
@@ -163,7 +162,7 @@ func (r *Rita) EventStore(name string, opts ...EventStoreOption) (*EventStore, e
 		}
 	}
 
-	if es.snapshotBucket != "" && es.snapshotKey != "" {
+	if es.snapshotBucket != "" {
 		jsCtx, err := jetstream.New(r.nc)
 		if err != nil {
 			return nil, fmt.Errorf("event store %s: failed to create JetStream context: %w", name, err)

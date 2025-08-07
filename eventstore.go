@@ -216,7 +216,6 @@ type EventStore struct {
 	rt   *Rita
 
 	snapshotBucket string             // Optional bucket for snapshots.
-	snapshotKey    string             // Optional key for snapshots.
 	snapshotKV     jetstream.KeyValue // Optional key-value store for snapshots.
 }
 
@@ -462,6 +461,7 @@ type evolveOpts struct {
 	withSnapshot        bool
 	fromSnapshot        bool
 	fromSnapshotHistory uint64
+	snapName            string
 }
 
 type evolveOptFn func(o *evolveOpts) error
@@ -489,17 +489,25 @@ func LoadAfterSequence(seq uint64) EvolveOption {
 // WithSnapshot indicates that a snapshot of the model should be taken after
 // the evolution is complete. The snapshot will be stored in the configured
 // bucket and key.
-func WithSnapshot() EvolveOption {
+func WithSnapshot(snapName string) EvolveOption {
 	return evolveOptFn(func(o *evolveOpts) error {
 		o.withSnapshot = true
+		if snapName == "" {
+			return fmt.Errorf("rita: snapshot name cannot be empty")
+		}
+		o.snapName = snapName
 		return nil
 	})
 }
 
-func FromSnapshot(history uint64) EvolveOption {
+func FromSnapshot(snapName string, history uint64) EvolveOption {
 	return evolveOptFn(func(o *evolveOpts) error {
 		o.fromSnapshot = true
 		o.fromSnapshotHistory = history
+		if snapName == "" {
+			return fmt.Errorf("rita: snapshot name cannot be empty")
+		}
+		o.snapName = snapName
 		return nil
 	})
 }
@@ -520,7 +528,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			return 0, ErrSnapshotStoreNotConfigured
 		}
 
-		kve, err := s.snapshotKV.GetRevision(ctx, s.snapshotKey, o.fromSnapshotHistory)
+		kve, err := s.snapshotKV.GetRevision(ctx, o.snapName, o.fromSnapshotHistory)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get snapshot: %w", err)
 		}
@@ -575,7 +583,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			return lastSeq, fmt.Errorf("failed to marshal snapshot: %w", err)
 		}
 
-		if _, err := s.snapshotKV.Put(ctx, s.snapshotKey, data); err != nil {
+		if _, err := s.snapshotKV.Put(ctx, o.snapName, data); err != nil {
 			return lastSeq, fmt.Errorf("failed to store snapshot: %w", err)
 		}
 
