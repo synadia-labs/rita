@@ -28,6 +28,7 @@ var (
 	ErrTimeFieldRequired          = errors.New("rita: event time required")
 	ErrEventTypeRequired          = errors.New("rita: event type required")
 	ErrSnapshotStoreNotConfigured = errors.New("rita: snapshot bucket not configured for event store")
+	ErrSnapshotDoesNotExist       = errors.New("rita: snapshot does not exist")
 )
 
 // Validator can be optionally implemented by user-defined types and will be
@@ -530,7 +531,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 
 		kve, err := s.snapshotKV.GetRevision(ctx, o.snapName, o.fromSnapshotHistory)
 		if err != nil {
-			return 0, fmt.Errorf("failed to get snapshot: %w", err)
+			return 0, ErrSnapshotDoesNotExist
 		}
 
 		var snapshot Snapshot
