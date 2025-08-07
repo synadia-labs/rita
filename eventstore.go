@@ -23,10 +23,11 @@ const (
 )
 
 var (
-	ErrSequenceConflict  = errors.New("rita: sequence conflict")
-	ErrEventIDRequired   = errors.New("rita: event id required")
-	ErrTimeFieldRequired = errors.New("rita: event time required")
-	ErrEventTypeRequired = errors.New("rita: event type required")
+	ErrSequenceConflict           = errors.New("rita: sequence conflict")
+	ErrEventIDRequired            = errors.New("rita: event id required")
+	ErrTimeFieldRequired          = errors.New("rita: event time required")
+	ErrEventTypeRequired          = errors.New("rita: event type required")
+	ErrSnapshotStoreNotConfigured = errors.New("rita: snapshot bucket not configured for event store")
 )
 
 // Validator can be optionally implemented by user-defined types and will be
@@ -35,8 +36,22 @@ type validator interface {
 	Validate() error
 }
 
+type Snapshot struct {
+	// LastSequence is the last sequence of the event that was used TODO
+	LastSequence uint64          `json:"last_sequence"`
+	Data         json.RawMessage `json:"data"`
+}
+
 type Evolver interface {
 	Evolve(event *Event) error
+
+	// MarshalJSON is used to marshal the data into a JSON format.
+	// This is used to store the snapshot in the key-value store.
+	MarshalJSON() ([]byte, error)
+
+	// UnmarshalJSON is used to unmarshal the data from a JSON format.
+	// This is used to load the snapshot from the key-value store.
+	UnmarshalJSON(data []byte) error
 }
 
 // Event is a wrapper for application-defined events.
@@ -199,6 +214,10 @@ type natsStoredMsg struct {
 type EventStore struct {
 	name string
 	rt   *Rita
+
+	snapshotBucket string             // Optional bucket for snapshots.
+	snapshotKey    string             // Optional key for snapshots.
+	snapshotKV     jetstream.KeyValue // Optional key-value store for snapshots.
 }
 
 // wrapEvent wraps a user-defined event into the Event envelope. It performs
@@ -438,11 +457,91 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 	return ack.Sequence, nil
 }
 
+type evolveOpts struct {
+	afterSeq            *uint64
+	withSnapshot        bool
+	fromSnapshot        bool
+	fromSnapshotHistory uint64
+}
+
+type evolveOptFn func(o *evolveOpts) error
+
+func (f evolveOptFn) evolveOpt(o *evolveOpts) error {
+	return f(o)
+}
+
+// EvolveOption is an option for the event store Evolve operation.
+type EvolveOption interface {
+	evolveOpt(o *evolveOpts) error
+}
+
+// LoadAfterSequence specifies the sequence of the first event that should be fetched
+// from the sequence up to the end of the sequence. This useful when partially applied
+// state has been derived up to a specific sequence and only the latest events need
+// to be fetched.
+func LoadAfterSequence(seq uint64) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.afterSeq = &seq
+		return nil
+	})
+}
+
+// WithSnapshot indicates that a snapshot of the model should be taken after
+// the evolution is complete. The snapshot will be stored in the configured
+// bucket and key.
+func WithSnapshot() EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.withSnapshot = true
+		return nil
+	})
+}
+
+func FromSnapshot(history uint64) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.fromSnapshot = true
+		o.fromSnapshotHistory = history
+		return nil
+	})
+}
+
 // Evolve loads events and evolves a model of state. The sequence of the
 // last event that evolved the state is returned, including when an error
 // occurs.
-func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...LoadOption) (uint64, error) {
-	events, lastSeq, err := s.Load(ctx, subject, opts...)
+func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...EvolveOption) (uint64, error) {
+	var o evolveOpts
+	for _, opt := range opts {
+		if err := opt.evolveOpt(&o); err != nil {
+			return 0, err
+		}
+	}
+
+	if o.fromSnapshot {
+		if s.snapshotKV == nil {
+			return 0, ErrSnapshotStoreNotConfigured
+		}
+
+		kve, err := s.snapshotKV.GetRevision(ctx, s.snapshotKey, o.fromSnapshotHistory)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get snapshot: %w", err)
+		}
+
+		var snapshot Snapshot
+		if err := json.Unmarshal(kve.Value(), &snapshot); err != nil {
+			return 0, fmt.Errorf("failed to unmarshal snapshot: %w", err)
+		}
+
+		err = model.UnmarshalJSON(snapshot.Data)
+		if err != nil {
+			return 0, fmt.Errorf("failed to unmarshal model from snapshot: %w", err)
+		}
+	}
+
+	var lo []LoadOption
+	if o.afterSeq != nil {
+		lo = append(lo, AfterSequence(*o.afterSeq))
+	}
+
+	events, lastSeq, err := s.Load(ctx, subject, lo...)
 	if err != nil {
 		return 0, err
 	}
@@ -454,6 +553,32 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			}
 		}
 		lastSeq = e.Sequence
+	}
+
+	if o.withSnapshot {
+		if s.snapshotKV == nil {
+			return lastSeq, ErrSnapshotStoreNotConfigured
+		}
+
+		modelB, err := model.MarshalJSON()
+		if err != nil {
+			return lastSeq, fmt.Errorf("failed to marshal model: %w", err)
+		}
+
+		snapshot := &Snapshot{
+			LastSequence: lastSeq,
+			Data:         modelB,
+		}
+
+		data, err := json.Marshal(snapshot)
+		if err != nil {
+			return lastSeq, fmt.Errorf("failed to marshal snapshot: %w", err)
+		}
+
+		if _, err := s.snapshotKV.Put(ctx, s.snapshotKey, data); err != nil {
+			return lastSeq, fmt.Errorf("failed to store snapshot: %w", err)
+		}
+
 	}
 
 	return lastSeq, nil

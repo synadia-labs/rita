@@ -2,6 +2,7 @@ package rita
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -137,11 +138,54 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-func (r *Rita) EventStore(name string) *EventStore {
-	return &EventStore{
+type EventStoreOption func(*EventStore) error
+
+func WithSnapshotSettings(bucket, key string) EventStoreOption {
+	return func(e *EventStore) error {
+		if bucket == "" || key == "" {
+			return fmt.Errorf("rita: snapshot bucket/key cannot be empty")
+		}
+		e.snapshotBucket = bucket
+		e.snapshotKey = key
+		return nil
+	}
+}
+
+func (r *Rita) EventStore(name string, opts ...EventStoreOption) (*EventStore, error) {
+	es := &EventStore{
 		name: name,
 		rt:   r,
 	}
+
+	for _, o := range opts {
+		if err := o(es); err != nil {
+			return nil, fmt.Errorf("event store %s: %w", name, err)
+		}
+	}
+
+	if es.snapshotBucket != "" && es.snapshotKey != "" {
+		jsCtx, err := jetstream.New(r.nc)
+		if err != nil {
+			return nil, fmt.Errorf("event store %s: failed to create JetStream context: %w", name, err)
+		}
+		kv, err := jsCtx.CreateKeyValue(r.ctx, jetstream.KeyValueConfig{
+			Bucket:      es.snapshotBucket,
+			Description: "Tracks snapshots of events for the event store",
+			MaxBytes:    10 << 20, // 10 MB
+			History:     10,
+		})
+		if errors.Is(err, jetstream.ErrBucketExists) {
+			kv, err = jsCtx.KeyValue(r.ctx, es.snapshotBucket)
+			if err != nil {
+				return nil, fmt.Errorf("event store %s: failed to get existing bucket: %w", name, err)
+			}
+		} else if err != nil {
+			return nil, fmt.Errorf("event store %s: failed to create bucket: %w", name, err)
+		}
+		es.snapshotKV = kv
+	}
+
+	return es, nil
 }
 
 // New initializes a new Rita instance with a NATS connection.

@@ -2,6 +2,7 @@ package rita
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -22,8 +23,8 @@ type OrderShipped struct {
 }
 
 type OrderStats struct {
-	OrdersPlaced  int
-	OrdersShipped int
+	OrdersPlaced  int `json:"orders_placed"`
+	OrdersShipped int `json:"orders_shipped"`
 }
 
 func (s *OrderStats) Evolve(event *Event) error {
@@ -32,6 +33,34 @@ func (s *OrderStats) Evolve(event *Event) error {
 		s.OrdersPlaced++
 	case *OrderShipped:
 		s.OrdersShipped++
+	}
+	return nil
+}
+
+func (s *OrderStats) MarshalJSON() ([]byte, error) {
+	type x OrderStats
+	return json.Marshal((*x)(s))
+}
+
+func (s *OrderStats) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	for k, v := range raw {
+		switch k {
+		case "orders_placed":
+			if err := json.Unmarshal(v, &s.OrdersPlaced); err != nil {
+				return err
+			}
+		case "orders_shipped":
+			if err := json.Unmarshal(v, &s.OrdersShipped); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown field %q", k)
+		}
 	}
 	return nil
 }
@@ -47,7 +76,8 @@ func TestNewEventConstructor(t *testing.T) {
 	r, err := New(t.Context(), nc)
 	is.NoErr(err)
 
-	es := r.EventStore("orders")
+	es, err := r.EventStore("orders")
+	is.NoErr(err)
 	err = es.Create(&jetstream.StreamConfig{
 		Storage: jetstream.MemoryStorage,
 	})
@@ -71,6 +101,72 @@ func TestNewEventConstructor(t *testing.T) {
 	is.Equal(e.Meta["foo"], "bar")
 }
 
+func TestEventStoreSnapshot(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServer(-1)
+	defer testutil.ShutdownNatsServer(srv)
+
+	nc, _ := nats.Connect(srv.ClientURL())
+
+	tr, err := types.NewRegistry(map[string]*types.Type{
+		"order-placed": {
+			Init: func() any { return &OrderPlaced{} },
+		},
+		"order-shipped": {
+			Init: func() any { return &OrderShipped{} },
+		},
+	})
+	is.NoErr(err)
+
+	r, err := New(t.Context(), nc, TypeRegistry(tr))
+	is.NoErr(err)
+
+	ctx := t.Context()
+
+	es, err := r.EventStore("orders", WithSnapshotSettings("snapshots", "orders-snapshot"))
+	is.NoErr(err)
+	err = es.Create(&jetstream.StreamConfig{
+		Storage: jetstream.MemoryStorage,
+	})
+	is.NoErr(err)
+
+	events := []*Event{
+		{Data: &OrderPlaced{ID: "1"}},
+		{Data: &OrderPlaced{ID: "2"}},
+		{Data: &OrderPlaced{ID: "3"}},
+		{Data: &OrderShipped{ID: "2"}},
+	}
+
+	seq, err := es.Append(ctx, "orders.*", events)
+	is.NoErr(err)
+	is.Equal(seq, uint64(4))
+
+	var stats OrderStats
+	seq2, err := es.Evolve(ctx, "orders.*", &stats, WithSnapshot())
+	is.NoErr(err)
+	is.Equal(seq, seq2)
+
+	is.Equal(stats.OrdersPlaced, 3)
+	is.Equal(stats.OrdersShipped, 1)
+
+	jsCtx, err := jetstream.New(nc)
+	is.NoErr(err)
+
+	jss, err := jsCtx.Stream(ctx, "orders")
+	is.NoErr(err)
+
+	err = jss.Purge(ctx)
+	is.NoErr(err)
+
+	loadStats := OrderStats{}
+	seqLoad, err := es.Evolve(ctx, "orders.*", &loadStats, FromSnapshot(0))
+	is.NoErr(err)
+	is.Equal(uint64(0), seqLoad)
+
+	is.Equal(stats, loadStats)
+}
+
 func TestEventStoreNoRegistry(t *testing.T) {
 	is := testutil.NewIs(t)
 
@@ -82,7 +178,8 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	r, err := New(t.Context(), nc)
 	is.NoErr(err)
 
-	es := r.EventStore("orders")
+	es, err := r.EventStore("orders")
+	is.NoErr(err)
 	err = es.Create(&jetstream.StreamConfig{
 		Storage: jetstream.MemoryStorage,
 	})
@@ -242,7 +339,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.NoErr(err)
 				is.Equal(seq, uint64(5))
 
-				seq2, err = es.Evolve(ctx, "orders.*", &stats, AfterSequence(seq2))
+				seq2, err = es.Evolve(ctx, "orders.*", &stats, LoadAfterSequence(seq2))
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -272,11 +369,12 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 	for i, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
-			es := r.EventStore("orders")
+			es, err := r.EventStore("orders")
+			is.NoErr(err)
 
 			// Recreate the store for each test.
 			_ = es.Delete()
-			err := es.Create(&jetstream.StreamConfig{
+			err = es.Create(&jetstream.StreamConfig{
 				Storage: jetstream.MemoryStorage,
 			})
 			is.NoErr(err)
