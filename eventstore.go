@@ -10,6 +10,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nuid"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -24,6 +25,7 @@ const (
 var (
 	ErrSequenceConflict  = errors.New("rita: sequence conflict")
 	ErrEventIDRequired   = errors.New("rita: event id required")
+	ErrTimeFieldRequired = errors.New("rita: event time required")
 	ErrEventTypeRequired = errors.New("rita: event type required")
 )
 
@@ -48,7 +50,7 @@ type Event struct {
 	// the current local time will be used.
 	Time time.Time
 
-	// Type is a unique name for the event itself. This can be ommitted
+	// Type is a unique name for the event itself. This can be omitted
 	// if a type registry is being used, otherwise it must be set explicitly
 	// to identity the encoded data.
 	Type string
@@ -65,6 +67,62 @@ type Event struct {
 
 	// Sequence is the sequence where this event exists in the stream. Read-only.
 	Sequence uint64
+}
+
+type NewEventOption func(*Event) error
+
+func NewEventID(id string) NewEventOption {
+	return func(e *Event) error {
+		if id == "" {
+			return ErrEventIDRequired
+		}
+		e.ID = id
+		return nil
+	}
+}
+
+func NewEventTime(t time.Time) NewEventOption {
+	return func(e *Event) error {
+		if t.IsZero() {
+			return ErrTimeFieldRequired
+		}
+		e.Time = t
+		return nil
+	}
+}
+
+func NewEventType(t string) NewEventOption {
+	return func(e *Event) error {
+		e.Type = t
+		return nil
+	}
+}
+
+func NewEventMetadata(metadata map[string]string) NewEventOption {
+	return func(e *Event) error {
+		if metadata != nil {
+			e.Meta = metadata
+		}
+		return nil
+	}
+}
+
+func NewEvent(data any, opts ...NewEventOption) (*Event, error) {
+	// Create a new event with the data provided.
+	e := &Event{
+		ID:   nuid.New().Next(),
+		Time: time.Now(),
+		Data: data,
+		Meta: map[string]string{},
+	}
+
+	for _, opt := range opts {
+		if err := opt(e); err != nil {
+			return nil, fmt.Errorf("failed to apply event option: %w", err)
+		}
+	}
+
+	return e, nil
 }
 
 type appendOpts struct {
