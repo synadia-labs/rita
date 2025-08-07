@@ -543,6 +543,8 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 		if err != nil {
 			return 0, fmt.Errorf("failed to unmarshal model from snapshot: %w", err)
 		}
+
+		o.afterSeq = &snapshot.LastSequence
 	}
 
 	var lo []LoadOption
