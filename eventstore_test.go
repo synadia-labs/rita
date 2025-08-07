@@ -57,7 +57,7 @@ func TestNewEventConstructor(t *testing.T) {
 	metadata := map[string]string{"foo": "bar"}
 
 	// Test with a valid type.
-	e, err := es.NewEvent(&OrderPlaced{ID: "123"},
+	e, err := NewEvent(&OrderPlaced{ID: "123"},
 		NewEventID("abc123"),
 		NewEventType("placed-order"),
 		NewEventTime(eventTime),

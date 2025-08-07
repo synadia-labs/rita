@@ -107,7 +107,7 @@ func NewEventMetadata(metadata map[string]string) NewEventOption {
 	}
 }
 
-func (s *EventStore) NewEvent(data any, opts ...NewEventOption) (*Event, error) {
+func NewEvent(data any, opts ...NewEventOption) (*Event, error) {
 	// Create a new event with the data provided.
 	e := &Event{
 		ID:   nuid.New().Next(),
