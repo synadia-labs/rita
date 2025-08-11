@@ -38,9 +38,9 @@ type validator interface {
 }
 
 type Snapshot struct {
-	// LastSequence is the last sequence of the event that was used TODO
-	LastSequence uint64 `json:"last_sequence"`
-	Data         []byte `json:"data"`
+	// LastSequence is the last sequence of the event that was used
+	AfterSequence uint64 `json:"after_sequence"`
+	Data          []byte `json:"data"`
 }
 
 type Snapshotable interface {
@@ -360,7 +360,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 		if *o.afterSeq == 0 {
 			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 		} else {
-			sopts.OptStartSeq = *o.afterSeq
+			sopts.OptStartSeq = *o.afterSeq + 1
 			sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
 		}
 	} else {
@@ -371,20 +371,11 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 	if err != nil {
 		return nil, 0, err
 	}
-
 	msgCtx, err := consumer.Messages()
 	if err != nil {
 		return nil, 0, err
 	}
 	defer msgCtx.Stop()
-
-	// Skip first.
-	if o.afterSeq != nil {
-		_, err := msgCtx.Next()
-		if err != nil {
-			return nil, 0, err
-		}
-	}
 
 	var events []*Event
 	for {
@@ -539,11 +530,15 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			return 0, fmt.Errorf("failed to unmarshal snapshot: %w", err)
 		}
 
+		if o.afterSeq != nil && snapshot.AfterSequence != *o.afterSeq {
+			return 0, fmt.Errorf("snapshot load after sequence %d does not match provided sequence %d", snapshot.AfterSequence, *o.afterSeq)
+		}
+
 		if err := codec.Unmarshal(snapshot.Data, model); err != nil {
 			return 0, fmt.Errorf("failed to unmarshal snapshot: %w", err)
 		}
 
-		o.afterSeq = &snapshot.LastSequence
+		o.afterSeq = &snapshot.AfterSequence
 	}
 
 	var lo []LoadOption
@@ -557,10 +552,8 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	}
 
 	for _, e := range events {
-		if e.Subject == subject {
-			if err := model.Evolve(e); err != nil {
-				return lastSeq, err
-			}
+		if err := model.Evolve(e); err != nil {
+			return lastSeq, err
 		}
 		lastSeq = e.Sequence
 	}
@@ -580,16 +573,16 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 		}
 
 		snapshot := &Snapshot{
-			LastSequence: lastSeq,
-			Data:         modelB,
+			AfterSequence: lastSeq,
+			Data:          modelB,
 		}
 
-		data, err := json.Marshal(snapshot)
+		snapshotB, err := json.Marshal(snapshot)
 		if err != nil {
 			return lastSeq, fmt.Errorf("failed to marshal snapshot: %w", err)
 		}
 
-		if _, err := s.snapshotKV.Put(ctx, o.snapName, data); err != nil {
+		if _, err := s.snapshotKV.Put(ctx, o.snapName, snapshotB); err != nil {
 			return lastSeq, fmt.Errorf("failed to store snapshot: %w", err)
 		}
 

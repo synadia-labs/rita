@@ -140,12 +140,28 @@ func TestEventStoreSnapshot(t *testing.T) {
 	err = jss.Purge(ctx)
 	is.NoErr(err)
 
+	events = []*Event{
+		{Data: &OrderPlaced{ID: "4"}},
+		{Data: &OrderShipped{ID: "1"}},
+	}
+
+	_, err = es.Append(ctx, "orders.*", events)
+	is.NoErr(err)
+
+	seq, err = es.Evolve(ctx, "orders.*", &stats)
+	is.NoErr(err)
+	is.Equal(stats.OrdersPlaced, 4)
+	is.Equal(stats.OrdersShipped, 2)
+	is.Equal(uint64(6), seq)
+
 	var loadStats OrderStats
 	loadStats.Codec = codec.Default
 
 	seqLoad, err := es.Evolve(ctx, "orders.*", &loadStats, FromSnapshot("orderstats", 0))
 	is.NoErr(err)
-	is.Equal(uint64(0), seqLoad)
+	is.Equal(loadStats.OrdersPlaced, 4)
+	is.Equal(loadStats.OrdersShipped, 2)
+	is.Equal(uint64(6), seqLoad)
 
 	is.Equal(stats, loadStats)
 }
