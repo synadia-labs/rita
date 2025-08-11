@@ -39,20 +39,16 @@ type validator interface {
 
 type Snapshot struct {
 	// LastSequence is the last sequence of the event that was used TODO
-	LastSequence uint64          `json:"last_sequence"`
-	Data         json.RawMessage `json:"data"`
+	LastSequence uint64 `json:"last_sequence"`
+	Data         []byte `json:"data"`
+}
+
+type Snapshotable interface {
+	codec.Codec
 }
 
 type Evolver interface {
 	Evolve(event *Event) error
-
-	// MarshalJSON is used to marshal the data into a JSON format.
-	// This is used to store the snapshot in the key-value store.
-	MarshalJSON() ([]byte, error)
-
-	// UnmarshalJSON is used to unmarshal the data from a JSON format.
-	// This is used to load the snapshot from the key-value store.
-	UnmarshalJSON(data []byte) error
 }
 
 // Event is a wrapper for application-defined events.
@@ -525,6 +521,10 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	}
 
 	if o.fromSnapshot {
+		codec, ok := model.(Snapshotable)
+		if !ok {
+			return 0, fmt.Errorf("model %T does not implement Snapshotable interface", model)
+		}
 		if s.snapshotKV == nil {
 			return 0, ErrSnapshotStoreNotConfigured
 		}
@@ -539,9 +539,8 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			return 0, fmt.Errorf("failed to unmarshal snapshot: %w", err)
 		}
 
-		err = model.UnmarshalJSON(snapshot.Data)
-		if err != nil {
-			return 0, fmt.Errorf("failed to unmarshal model from snapshot: %w", err)
+		if err := codec.Unmarshal(snapshot.Data, model); err != nil {
+			return 0, fmt.Errorf("failed to unmarshal snapshot: %w", err)
 		}
 
 		o.afterSeq = &snapshot.LastSequence
@@ -567,11 +566,15 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	}
 
 	if o.withSnapshot {
+		codec, ok := model.(Snapshotable)
+		if !ok {
+			return 0, fmt.Errorf("model %T does not implement Snapshotable interface", model)
+		}
 		if s.snapshotKV == nil {
 			return lastSeq, ErrSnapshotStoreNotConfigured
 		}
 
-		modelB, err := model.MarshalJSON()
+		modelB, err := codec.Marshal(model)
 		if err != nil {
 			return lastSeq, fmt.Errorf("failed to marshal model: %w", err)
 		}

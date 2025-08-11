@@ -2,13 +2,13 @@ package rita
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/synadia-labs/rita/codec"
 	"github.com/synadia-labs/rita/id"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
@@ -22,9 +22,16 @@ type OrderShipped struct {
 	ID string
 }
 
+var (
+	_ Evolver      = (*OrderStats)(nil)
+	_ Snapshotable = (*OrderStats)(nil)
+)
+
 type OrderStats struct {
 	OrdersPlaced  int `json:"orders_placed"`
 	OrdersShipped int `json:"orders_shipped"`
+
+	codec.Codec `json:"-"`
 }
 
 func (s *OrderStats) Evolve(event *Event) error {
@@ -33,34 +40,6 @@ func (s *OrderStats) Evolve(event *Event) error {
 		s.OrdersPlaced++
 	case *OrderShipped:
 		s.OrdersShipped++
-	}
-	return nil
-}
-
-func (s *OrderStats) MarshalJSON() ([]byte, error) {
-	type x OrderStats
-	return json.Marshal((*x)(s))
-}
-
-func (s *OrderStats) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	for k, v := range raw {
-		switch k {
-		case "orders_placed":
-			if err := json.Unmarshal(v, &s.OrdersPlaced); err != nil {
-				return err
-			}
-		case "orders_shipped":
-			if err := json.Unmarshal(v, &s.OrdersShipped); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unknown field %q", k)
-		}
 	}
 	return nil
 }
@@ -143,6 +122,8 @@ func TestEventStoreSnapshot(t *testing.T) {
 	is.Equal(seq, uint64(4))
 
 	var stats OrderStats
+	stats.Codec = codec.Default
+
 	seq2, err := es.Evolve(ctx, "orders.*", &stats, WithSnapshot("orderstats"))
 	is.NoErr(err)
 	is.Equal(seq, seq2)
@@ -159,7 +140,9 @@ func TestEventStoreSnapshot(t *testing.T) {
 	err = jss.Purge(ctx)
 	is.NoErr(err)
 
-	loadStats := OrderStats{}
+	var loadStats OrderStats
+	loadStats.Codec = codec.Default
+
 	seqLoad, err := es.Evolve(ctx, "orders.*", &loadStats, FromSnapshot("orderstats", 0))
 	is.NoErr(err)
 	is.Equal(uint64(0), seqLoad)
