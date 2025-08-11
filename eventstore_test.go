@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -53,21 +52,16 @@ func TestNewEventConstructor(t *testing.T) {
 	})
 	is.NoErr(err)
 
-	eventTime := time.Now()
 	metadata := map[string]string{"foo": "bar"}
 
 	// Test with a valid type.
-	e, err := NewEvent(&OrderPlaced{ID: "123"},
-		NewEventID("abc123"),
+	e, err := es.NewEvent(&OrderPlaced{ID: "123"},
 		NewEventType("placed-order"),
-		NewEventTime(eventTime),
 		NewEventMetadata(metadata),
 	)
 	is.NoErr(err)
-	is.Equal(e.ID, "abc123")
 	is.Equal(e.Type, "placed-order")
 	is.Equal(e.Data.(*OrderPlaced).ID, "123")
-	is.Equal(e.Time, eventTime)
 	is.Equal(e.Meta["foo"], "bar")
 }
 

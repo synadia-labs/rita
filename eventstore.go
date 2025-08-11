@@ -10,7 +10,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/nats-io/nuid"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -71,26 +70,6 @@ type Event struct {
 
 type NewEventOption func(*Event) error
 
-func NewEventID(id string) NewEventOption {
-	return func(e *Event) error {
-		if id == "" {
-			return ErrEventIDRequired
-		}
-		e.ID = id
-		return nil
-	}
-}
-
-func NewEventTime(t time.Time) NewEventOption {
-	return func(e *Event) error {
-		if t.IsZero() {
-			return ErrTimeFieldRequired
-		}
-		e.Time = t
-		return nil
-	}
-}
-
 func NewEventType(t string) NewEventOption {
 	return func(e *Event) error {
 		e.Type = t
@@ -107,11 +86,9 @@ func NewEventMetadata(metadata map[string]string) NewEventOption {
 	}
 }
 
-func NewEvent(data any, opts ...NewEventOption) (*Event, error) {
+func (es *EventStore) NewEvent(data any, opts ...NewEventOption) (*Event, error) {
 	// Create a new event with the data provided.
 	e := &Event{
-		ID:   nuid.New().Next(),
-		Time: time.Now(),
 		Data: data,
 		Meta: map[string]string{},
 	}
@@ -119,6 +96,23 @@ func NewEvent(data any, opts ...NewEventOption) (*Event, error) {
 	for _, opt := range opts {
 		if err := opt(e); err != nil {
 			return nil, fmt.Errorf("failed to apply event option: %w", err)
+		}
+	}
+
+	if es.rt.types == nil {
+		if e.Type == "" {
+			return nil, errors.New("event type is not defined")
+		}
+	} else {
+		t, err := es.rt.types.Lookup(e.Data)
+		if err != nil {
+			return nil, err
+		}
+
+		if e.Type == "" {
+			e.Type = t
+		} else if e.Type != t {
+			return nil, fmt.Errorf("wrong type for event data: %s", e.Type)
 		}
 	}
 
