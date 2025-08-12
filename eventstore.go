@@ -10,7 +10,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/nats-io/nuid"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -62,67 +61,11 @@ type Event struct {
 	// Metadata is application-defined metadata about the event.
 	Meta map[string]string
 
-	// Subject is the the subject the event is associated with. Read-only.
-	Subject string
+	// subject is the the subject the event is associated with. Read-only.
+	subject string
 
-	// Sequence is the sequence where this event exists in the stream. Read-only.
-	Sequence uint64
-}
-
-type NewEventOption func(*Event) error
-
-func NewEventID(id string) NewEventOption {
-	return func(e *Event) error {
-		if id == "" {
-			return ErrEventIDRequired
-		}
-		e.ID = id
-		return nil
-	}
-}
-
-func NewEventTime(t time.Time) NewEventOption {
-	return func(e *Event) error {
-		if t.IsZero() {
-			return ErrTimeFieldRequired
-		}
-		e.Time = t
-		return nil
-	}
-}
-
-func NewEventType(t string) NewEventOption {
-	return func(e *Event) error {
-		e.Type = t
-		return nil
-	}
-}
-
-func NewEventMetadata(metadata map[string]string) NewEventOption {
-	return func(e *Event) error {
-		if metadata != nil {
-			e.Meta = metadata
-		}
-		return nil
-	}
-}
-
-func NewEvent(data any, opts ...NewEventOption) (*Event, error) {
-	// Create a new event with the data provided.
-	e := &Event{
-		ID:   nuid.New().Next(),
-		Time: time.Now(),
-		Data: data,
-		Meta: map[string]string{},
-	}
-
-	for _, opt := range opts {
-		if err := opt(e); err != nil {
-			return nil, fmt.Errorf("failed to apply event option: %w", err)
-		}
-	}
-
-	return e, nil
+	// sequence is the sequence where this event exists in the stream. Read-only.
+	sequence uint64
 }
 
 type appendOpts struct {
@@ -385,7 +328,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 
 		events = append(events, event)
 
-		if event.Sequence == lastMsg.Sequence {
+		if event.sequence == lastMsg.Sequence {
 			break
 		}
 	}
@@ -448,12 +391,10 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	}
 
 	for _, e := range events {
-		if e.Subject == subject {
-			if err := model.Evolve(e); err != nil {
-				return lastSeq, err
-			}
+		if err := model.Evolve(e); err != nil {
+			return lastSeq, err
 		}
-		lastSeq = e.Sequence
+		lastSeq = e.sequence
 	}
 
 	return lastSeq, nil

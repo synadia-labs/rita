@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -34,41 +33,6 @@ func (s *OrderStats) Evolve(event *Event) error {
 		s.OrdersShipped++
 	}
 	return nil
-}
-
-func TestNewEventConstructor(t *testing.T) {
-	is := testutil.NewIs(t)
-
-	srv := testutil.NewNatsServer(-1)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, _ := nats.Connect(srv.ClientURL())
-
-	r, err := New(t.Context(), nc)
-	is.NoErr(err)
-
-	es := r.EventStore("orders")
-	err = es.Create(&jetstream.StreamConfig{
-		Storage: jetstream.MemoryStorage,
-	})
-	is.NoErr(err)
-
-	eventTime := time.Now()
-	metadata := map[string]string{"foo": "bar"}
-
-	// Test with a valid type.
-	e, err := NewEvent(&OrderPlaced{ID: "123"},
-		NewEventID("abc123"),
-		NewEventType("placed-order"),
-		NewEventTime(eventTime),
-		NewEventMetadata(metadata),
-	)
-	is.NoErr(err)
-	is.Equal(e.ID, "abc123")
-	is.Equal(e.Type, "placed-order")
-	is.Equal(e.Data.(*OrderPlaced).ID, "123")
-	is.Equal(e.Time, eventTime)
-	is.Equal(e.Meta["foo"], "bar")
 }
 
 func TestEventStoreNoRegistry(t *testing.T) {
