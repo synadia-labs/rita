@@ -92,27 +92,27 @@ func ExpectSequence(seq uint64) AppendOption {
 	})
 }
 
-type loadOpts struct {
+type evolveOpts struct {
 	afterSeq *uint64
 }
 
-type loadOptFn func(o *loadOpts) error
+type evolveOptFn func(o *evolveOpts) error
 
-func (f loadOptFn) loadOpt(o *loadOpts) error {
+func (f evolveOptFn) evolveOpt(o *evolveOpts) error {
 	return f(o)
 }
 
-// LoadOption is an option for the event store Load operation.
-type LoadOption interface {
-	loadOpt(o *loadOpts) error
+// EvolveOption is an option for the event store Evolve operation.
+type EvolveOption interface {
+	evolveOpt(o *evolveOpts) error
 }
 
 // AfterSequence specifies the sequence of the first event that should be fetched
 // from the sequence up to the end of the sequence. This useful when partially applied
 // state has been derived up to a specific sequence and only the latest events need
 // to be fetched.
-func AfterSequence(seq uint64) LoadOption {
-	return loadOptFn(func(o *loadOpts) error {
+func AfterSequence(seq uint64) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
 		o.afterSeq = &seq
 		return nil
 	})
@@ -255,26 +255,25 @@ func (s *EventStore) lastMsgForSubject(ctx context.Context, subject string) (*na
 	return rep.Message, nil
 }
 
-// Load fetches all events for a specific subject. The primary use case
-// is to use a concrete subject, e.g. "orders.1" corresponding to an
-// aggregate/entity identifier. The second use case is to load events for
-// a cross-cutting view which can use subject wildcards.
-func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOption) ([]*Event, uint64, error) {
+// Evolve loads events and evolves a model of state. The sequence of the
+// last event that evolved the state is returned, including when an error
+// occurs.
+func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...EvolveOption) (uint64, error) {
 	// Configure opts.
-	var o loadOpts
+	var o evolveOpts
 	for _, opt := range opts {
-		if err := opt.loadOpt(&o); err != nil {
-			return nil, 0, err
+		if err := opt.evolveOpt(&o); err != nil {
+			return 0, err
 		}
 	}
 
 	lastMsg, err := s.lastMsgForSubject(ctx, subject)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 
 	if lastMsg.Sequence == 0 {
-		return nil, 0, nil
+		return 0, nil
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
@@ -283,7 +282,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 	// Don't bother creating the consumer if the last seq is smaller than start.
 	if o.afterSeq != nil {
 		if lastMsg.Sequence <= *o.afterSeq {
-			return nil, lastMsg.Sequence, nil
+			return lastMsg.Sequence, nil
 		}
 		if *o.afterSeq == 0 {
 			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
@@ -297,12 +296,12 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 
 	consumer, err := s.rt.js.OrderedConsumer(s.rt.ctx, s.name, sopts)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 
 	msgCtx, err := consumer.Messages()
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	defer msgCtx.Stop()
 
@@ -310,30 +309,33 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 	if o.afterSeq != nil {
 		_, err := msgCtx.Next()
 		if err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 	}
 
-	var events []*Event
+	var lastSeq uint64
 	for {
 		msg, err := msgCtx.Next()
 		if err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 
 		event, err := s.rt.UnpackEvent(msg)
 		if err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 
-		events = append(events, event)
+		if err := model.Evolve(event); err != nil {
+			return lastSeq, err
+		}
+		lastSeq = event.sequence
 
 		if event.sequence == lastMsg.Sequence {
 			break
 		}
 	}
 
-	return events, lastMsg.Sequence, nil
+	return lastMsg.Sequence, nil
 }
 
 // Append appends a one or more events to the subject's event sequence.
@@ -379,25 +381,6 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 	}
 
 	return ack.Sequence, nil
-}
-
-// Evolve loads events and evolves a model of state. The sequence of the
-// last event that evolved the state is returned, including when an error
-// occurs.
-func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...LoadOption) (uint64, error) {
-	events, lastSeq, err := s.Load(ctx, subject, opts...)
-	if err != nil {
-		return 0, err
-	}
-
-	for _, e := range events {
-		if err := model.Evolve(e); err != nil {
-			return lastSeq, err
-		}
-		lastSeq = e.sequence
-	}
-
-	return lastSeq, nil
 }
 
 // Create creates the event store given the configuration. The stream
