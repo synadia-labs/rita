@@ -61,62 +61,11 @@ type Event struct {
 	// Metadata is application-defined metadata about the event.
 	Meta map[string]string
 
-	// Subject is the the subject the event is associated with. Read-only.
-	Subject string
+	// subject is the the subject the event is associated with. Read-only.
+	subject string
 
-	// Sequence is the sequence where this event exists in the stream. Read-only.
-	Sequence uint64
-}
-
-type NewEventOption func(*Event) error
-
-func NewEventType(t string) NewEventOption {
-	return func(e *Event) error {
-		e.Type = t
-		return nil
-	}
-}
-
-func NewEventMetadata(metadata map[string]string) NewEventOption {
-	return func(e *Event) error {
-		if metadata != nil {
-			e.Meta = metadata
-		}
-		return nil
-	}
-}
-
-func (es *EventStore) NewEvent(data any, opts ...NewEventOption) (*Event, error) {
-	// Create a new event with the data provided.
-	e := &Event{
-		Data: data,
-		Meta: map[string]string{},
-	}
-
-	for _, opt := range opts {
-		if err := opt(e); err != nil {
-			return nil, fmt.Errorf("failed to apply event option: %w", err)
-		}
-	}
-
-	if es.rt.types == nil {
-		if e.Type == "" {
-			return nil, errors.New("event type is not defined")
-		}
-	} else {
-		t, err := es.rt.types.Lookup(e.Data)
-		if err != nil {
-			return nil, err
-		}
-
-		if e.Type == "" {
-			e.Type = t
-		} else if e.Type != t {
-			return nil, fmt.Errorf("wrong type for event data: %s", e.Type)
-		}
-	}
-
-	return e, nil
+	// sequence is the sequence where this event exists in the stream. Read-only.
+	sequence uint64
 }
 
 type appendOpts struct {
@@ -379,7 +328,7 @@ func (s *EventStore) Load(ctx context.Context, subject string, opts ...LoadOptio
 
 		events = append(events, event)
 
-		if event.Sequence == lastMsg.Sequence {
+		if event.sequence == lastMsg.Sequence {
 			break
 		}
 	}
@@ -442,12 +391,10 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	}
 
 	for _, e := range events {
-		if e.Subject == subject {
-			if err := model.Evolve(e); err != nil {
-				return lastSeq, err
-			}
+		if err := model.Evolve(e); err != nil {
+			return lastSeq, err
 		}
-		lastSeq = e.Sequence
+		lastSeq = e.sequence
 	}
 
 	return lastSeq, nil

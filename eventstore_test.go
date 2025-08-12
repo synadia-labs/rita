@@ -35,36 +35,6 @@ func (s *OrderStats) Evolve(event *Event) error {
 	return nil
 }
 
-func TestNewEventConstructor(t *testing.T) {
-	is := testutil.NewIs(t)
-
-	srv := testutil.NewNatsServer(-1)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, _ := nats.Connect(srv.ClientURL())
-
-	r, err := New(t.Context(), nc)
-	is.NoErr(err)
-
-	es := r.EventStore("orders")
-	err = es.Create(&jetstream.StreamConfig{
-		Storage: jetstream.MemoryStorage,
-	})
-	is.NoErr(err)
-
-	metadata := map[string]string{"foo": "bar"}
-
-	// Test with a valid type.
-	e, err := es.NewEvent(&OrderPlaced{ID: "123"},
-		NewEventType("placed-order"),
-		NewEventMetadata(metadata),
-	)
-	is.NoErr(err)
-	is.Equal(e.Type, "placed-order")
-	is.Equal(e.Data.(*OrderPlaced).ID, "123")
-	is.Equal(e.Meta["foo"], "bar")
-}
-
 func TestEventStoreNoRegistry(t *testing.T) {
 	is := testutil.NewIs(t)
 

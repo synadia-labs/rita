@@ -132,8 +132,8 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 		Time:     eventTime,
 		Data:     data,
 		Meta:     meta,
-		Subject:  msg.Subject(),
-		Sequence: seq,
+		subject:  msg.Subject(),
+		sequence: seq,
 	}, nil
 }
 
