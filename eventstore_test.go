@@ -35,6 +35,13 @@ func (s *OrderStats) Evolve(event *Event) error {
 	return nil
 }
 
+type eventSlice []*Event
+
+func (es *eventSlice) Evolve(event *Event) error {
+	*es = append(*es, event)
+	return nil
+}
+
 func TestEventStoreNoRegistry(t *testing.T) {
 	is := testutil.NewIs(t)
 
@@ -61,7 +68,9 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	is.NoErr(err)
 	is.Equal(seq, uint64(1))
 
-	events, _, err := es.Load(ctx, "orders.1")
+	var events eventSlice
+
+	_, err = es.Evolve(ctx, "orders.1", &events)
 	is.NoErr(err)
 	is.Equal(events[0].Type, "foo")
 	is.Equal(events[0].Data, []byte("hello"))
@@ -85,7 +94,8 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
-				events, lseq, err := es.Load(ctx, subject)
+				var events eventSlice
+				lseq, err := es.Evolve(ctx, subject, &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -123,7 +133,8 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
-				events, lseq, err := es.Load(ctx, subject)
+				var events eventSlice
+				lseq, err := es.Evolve(ctx, subject, &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -143,7 +154,8 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
-				events, lseq, err := es.Load(ctx, subject, AfterSequence(1))
+				var events eventSlice
+				lseq, err := es.Evolve(ctx, subject, &events, AfterSequence(1))
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
