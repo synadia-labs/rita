@@ -277,7 +277,9 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
-	sopts := jetstream.OrderedConsumerConfig{}
+	sopts := jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{subject},
+	}
 
 	// Don't bother creating the consumer if the last seq is smaller than start.
 	if o.afterSeq != nil {
