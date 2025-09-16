@@ -44,11 +44,11 @@ func TestNewRegistry(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewRegistry(map[string]*Type{
+			_, err := NewInMemRegistry(map[string]*Type{
 				"a": {
 					Init: test.Init,
 				},
-			})
+			}, codec.Default)
 			if err != nil && !test.Err {
 				t.Errorf("unexpected error: %s", err)
 			} else if err == nil && test.Err {
@@ -71,7 +71,7 @@ func TestMarshalUnmarshal(t *testing.T) {
 
 	for _, c := range codec.Codecs {
 		t.Run(c.Name(), func(t *testing.T) {
-			rt, err := NewRegistry(ty, Codec(c.Name()))
+			rt, err := NewInMemRegistry(ty, c)
 			is.NoErr(err)
 
 			v1 := pb.A{
@@ -110,11 +110,11 @@ func TestMarshalUnmarshal(t *testing.T) {
 func BenchmarkInit(b *testing.B) {
 	type T struct{}
 
-	r, _ := NewRegistry(map[string]*Type{
+	r, _ := NewInMemRegistry(map[string]*Type{
 		"a": {
 			Init: func() any { return &T{} },
 		},
-	})
+	}, codec.Default)
 
 	b.ResetTimer()
 
@@ -126,11 +126,11 @@ func BenchmarkInit(b *testing.B) {
 func BenchmarkLookup(b *testing.B) {
 	type T struct{}
 
-	r, _ := NewRegistry(map[string]*Type{
+	r, _ := NewInMemRegistry(map[string]*Type{
 		"a": {
 			Init: func() any { return &T{} },
 		},
-	})
+	}, codec.Default)
 
 	v := &T{}
 

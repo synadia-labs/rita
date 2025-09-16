@@ -7,6 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/synadia-labs/rita/codec"
 	"github.com/synadia-labs/rita/id"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
@@ -233,14 +234,14 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 	nc, _ := nats.Connect(srv.ClientURL())
 
-	tr, err := types.NewRegistry(map[string]*types.Type{
+	tr, err := types.NewInMemRegistry(map[string]*types.Type{
 		"order-placed": {
 			Init: func() any { return &OrderPlaced{} },
 		},
 		"order-shipped": {
 			Init: func() any { return &OrderShipped{} },
 		},
-	})
+	}, codec.Default)
 	is.NoErr(err)
 
 	r, err := New(t.Context(), nc, TypeRegistry(tr))

@@ -27,7 +27,7 @@ type RitaOption interface {
 }
 
 // TypeRegistry sets an explicit type registry.
-func TypeRegistry(types *types.Registry) RitaOption {
+func TypeRegistry(types types.Registry) RitaOption {
 	return ritaOption(func(o *Rita) error {
 		o.types = types
 		return nil
@@ -65,7 +65,7 @@ type Rita struct {
 
 	id    id.ID
 	clock clock.Clock
-	types *types.Registry
+	types types.Registry
 }
 
 // UnpackEvent unpacks an Event from a NATS message.

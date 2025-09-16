@@ -33,33 +33,42 @@ type Type struct {
 	// Schema
 }
 
-type registryOption func(o *Registry) error
+// type registryOption func(o *InMemRegistry) error
+//
+// func (f registryOption) addOption(o *InMemRegistry) error {
+// 	return f(o)
+// }
+//
+// // RegistryOption models a option when creating a type registry.
+// type RegistryOption interface {
+// 	addOption(o *InMemRegistry) error
+// }
+//
+// // Codec is a registry option to define the desired serialization codec.
+// func Codec(name string) RegistryOption {
+// 	return registryOption(func(o *InMemRegistry) error {
+// 		c, ok := codec.Codecs[name]
+// 		if !ok {
+// 			return fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, name)
+// 		}
+//
+// 		o.codec = c
+// 		return nil
+// 	})
+// }
 
-func (f registryOption) addOption(o *Registry) error {
-	return f(o)
+type Registry interface {
+	Codec() codec.Codec
+	Init(t string) (any, error)
+	Lookup(v any) (string, error)
+	Marshal(v any) ([]byte, error)
+	Unmarshal(b []byte, v any) error
+	UnmarshalType(b []byte, t string) (any, error)
 }
 
-// RegistryOption models a option when creating a type registry.
-type RegistryOption interface {
-	addOption(o *Registry) error
-}
-
-// Codec is a registry option to define the desired serialization codec.
-func Codec(name string) RegistryOption {
-	return registryOption(func(o *Registry) error {
-		c, ok := codec.Codecs[name]
-		if !ok {
-			return fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, name)
-		}
-
-		o.codec = c
-		return nil
-	})
-}
-
-// Registry is used for transparently marshaling and unmarshaling messages
+// InMemRegistry is used for transparently marshaling and unmarshaling messages
 // and values from their native types to their network/storage representation.
-type Registry struct {
+type InMemRegistry struct {
 	// Codec for marshaling and unmarshaling a values.
 	codec codec.Codec
 
@@ -70,11 +79,11 @@ type Registry struct {
 	rtypes map[reflect.Type]string
 }
 
-func (r *Registry) Codec() codec.Codec {
+func (r *InMemRegistry) Codec() codec.Codec {
 	return r.codec
 }
 
-func (r *Registry) validate(name string, typ *Type) error {
+func (r *InMemRegistry) validate(name string, typ *Type) error {
 	if name == "" {
 		return fmt.Errorf("%w: missing name", ErrTypeNotValid)
 	}
@@ -120,7 +129,7 @@ func (r *Registry) validate(name string, typ *Type) error {
 	return nil
 }
 
-func (r *Registry) addType(name string, typ *Type) {
+func (r *InMemRegistry) addType(name string, typ *Type) {
 	r.types[name] = typ
 
 	// Initialize a value, reflect the type to index.
@@ -132,7 +141,7 @@ func (r *Registry) addType(name string, typ *Type) {
 }
 
 // Init a value given the registered name of the type.
-func (r *Registry) Init(t string) (any, error) {
+func (r *InMemRegistry) Init(t string) (any, error) {
 	x, ok := r.types[t]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrTypeNotRegistered, t)
@@ -143,7 +152,7 @@ func (r *Registry) Init(t string) (any, error) {
 }
 
 // Lookup returns the registered name of the type given a value.
-func (r *Registry) Lookup(v any) (string, error) {
+func (r *InMemRegistry) Lookup(v any) (string, error) {
 	rt := reflect.TypeOf(v)
 	t, ok := r.rtypes[rt]
 	if !ok {
@@ -155,7 +164,7 @@ func (r *Registry) Lookup(v any) (string, error) {
 
 // Marshal serializes the value to a byte slice. This call
 // validates the type is registered and delegates to the codec.
-func (r *Registry) Marshal(v any) ([]byte, error) {
+func (r *InMemRegistry) Marshal(v any) ([]byte, error) {
 	_, err := r.Lookup(v)
 	if err != nil {
 		return nil, err
@@ -170,7 +179,7 @@ func (r *Registry) Marshal(v any) ([]byte, error) {
 
 // Unmarshal deserializes a byte slice into the value. This call
 // validates the type is registered and delegates to the codec.
-func (r *Registry) Unmarshal(b []byte, v any) error {
+func (r *InMemRegistry) Unmarshal(b []byte, v any) error {
 	_, err := r.Lookup(v)
 	if err != nil {
 		return err
@@ -185,7 +194,7 @@ func (r *Registry) Unmarshal(b []byte, v any) error {
 
 // UnmarshalType initializes a new value for the registered type,
 // unmarshals the byte slice, and returns it.
-func (r *Registry) UnmarshalType(b []byte, t string) (any, error) {
+func (r *InMemRegistry) UnmarshalType(b []byte, t string) (any, error) {
 	v, err := r.Init(t)
 	if err != nil {
 		return nil, err
@@ -197,17 +206,11 @@ func (r *Registry) UnmarshalType(b []byte, t string) (any, error) {
 	return v, nil
 }
 
-func NewRegistry(types map[string]*Type, opts ...RegistryOption) (*Registry, error) {
-	r := &Registry{
-		codec:  codec.Default,
+func NewInMemRegistry(types map[string]*Type, c codec.Codec) (Registry, error) {
+	r := &InMemRegistry{
+		codec:  c,
 		types:  make(map[string]*Type),
 		rtypes: make(map[reflect.Type]string),
-	}
-
-	for _, f := range opts {
-		if err := f.addOption(r); err != nil {
-			return nil, err
-		}
 	}
 
 	for n, t := range types {
