@@ -2,6 +2,7 @@ package types
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,7 +192,7 @@ func TestNewNatsRegistry(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewNatsRegistry(context.Background(), nil, test.Types, codec.Default, nc)
+			_, err := NewNatsRegistry(context.Background(), slog.New(slog.DiscardHandler), test.Types, codec.Default, nc)
 			if err != nil && !test.Err {
 				t.Errorf("unexpected error: %s", err)
 			} else if err == nil && test.Err {
@@ -252,7 +253,7 @@ func TestNatsMarshalUnmarshal(t *testing.T) {
 
 	for _, c := range compatibleCodecs {
 		t.Run(c.Name(), func(t *testing.T) {
-			rt, err := NewNatsRegistry(context.Background(), nil, types, c, nc)
+			rt, err := NewNatsRegistry(context.Background(), slog.New(slog.DiscardHandler), types, c, nc)
 			is.NoErr(err)
 
 			t.Cleanup(func() {
@@ -329,7 +330,7 @@ func TestNatsRegistryOperations(t *testing.T) {
 		},
 	}
 
-	r, err := NewNatsRegistry(context.Background(), nil, types, codec.Default, nc)
+	r, err := NewNatsRegistry(context.Background(), slog.New(slog.DiscardHandler), types, codec.Default, nc)
 	is.NoErr(err)
 
 	// Test Init - should work now that we keep factory functions in memory
@@ -401,7 +402,7 @@ func TestNatsRegistryPointerNonPointer(t *testing.T) {
 		},
 	}
 
-	r, err := NewNatsRegistry(context.Background(), nil, types, codec.Default, nc)
+	r, err := NewNatsRegistry(context.Background(), slog.New(slog.DiscardHandler), types, codec.Default, nc)
 	is.NoErr(err)
 
 	// Create a value
@@ -465,7 +466,7 @@ func TestNatsRegistryWithComplexSchema(t *testing.T) {
 		},
 	}
 
-	r, err := NewNatsRegistry(context.Background(), nil, types, codec.Default, nc)
+	r, err := NewNatsRegistry(context.Background(), slog.New(slog.DiscardHandler), types, codec.Default, nc)
 	is.NoErr(err)
 
 	// Test with valid data
@@ -662,9 +663,9 @@ func TestNatsRegistryDataValidation(t *testing.T) {
 		},
 	}
 
-	r, err := NewNatsRegistry(context.Background(), nil, types, codec.Default, nc)
+	r, err := NewNatsRegistry(context.Background(), slog.New(slog.DiscardHandler), types, codec.Default, nc)
 	is.NoErr(err)
-	
+
 	// Test valid data passes validation
 	validPerson := &Person{Name: "John Doe", Age: 30, Email: "john@example.com"}
 	_, err = r.Marshal(validPerson)
@@ -697,4 +698,3 @@ func TestNatsRegistryDataValidation(t *testing.T) {
 		is.True(strings.Contains(err.Error(), "validation failed"))
 	}
 }
-

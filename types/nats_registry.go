@@ -13,12 +13,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/synadia-labs/rita/codec"
-	schemaregistry "github.com/synadia-labs/schema-registry"
-)
 
-const (
-	defaultSchemaBucket = "schemas"
-	uriBase             = "file://io.nexus"
+	"github.com/synadia-io/schema-registry-sdk/go/schemaregistry"
 )
 
 var (
@@ -190,26 +186,11 @@ func NewNatsRegistry(ctx context.Context, logger *slog.Logger, types map[string]
 		return nil, fmt.Errorf("creating jetstream context: %w", err)
 	}
 
-	// Create or get the schema registry KV store
-	schemaKV, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: defaultSchemaBucket,
-	})
-	if err != nil && err != jetstream.ErrBucketExists {
-		return nil, fmt.Errorf("creating schema key-value store: %w", err)
-	}
-
-	if errors.Is(err, jetstream.ErrBucketExists) {
-		schemaKV, err = js.KeyValue(ctx, defaultSchemaBucket)
-		if err != nil {
-			return nil, fmt.Errorf("getting schema key-value store: %w", err)
-		}
-	}
-
 	r := &NatsRegistry{
 		ctx:      ctx,
 		logger:   logger,
 		codec:    c,
-		registry: schemaregistry.NewRegistry(ctx, js, schemaKV),
+		registry: schemaregistry.NewSchemaRegistry(nc),
 		js:       js,
 		types:    make(map[string]Type),
 		rtypes:   make(map[string]string),
@@ -259,25 +240,19 @@ func NewNatsRegistry(ctx context.Context, logger *slog.Logger, types map[string]
 				return nil, fmt.Errorf("reading schema file %s: %w", natsType.DocPath, err)
 			}
 
-			// Add schema to registry
-			_, err = r.registry.Add(ctx, schemaName, &schemaregistry.AddRequest{
+			// Try to add schema to registry - this may fail if registry service isn't running
+			_, err = r.registry.Add(ctx, schemaregistry.AddRequest{
 				Name:         schemaName,
 				Definition:   string(schemaDefinition),
-				Format:       schemaregistry.SchemaTypeJSONSchema,
-				CompatPolicy: schemaregistry.SchemaCompatPolicyNone,
+				Format:       schemaregistry.FormatJSONSchema,
+				CompatPolicy: schemaregistry.CompatNone,
 				Description:  natsType.Description,
 				Metadata:     map[string]string{},
 			})
-			if err != nil {
-				// Check if schema already exists - if so, that's okay
-				if !errors.Is(err, jetstream.ErrKeyExists) &&
-					!strings.Contains(err.Error(), "key exists") &&
-					!strings.Contains(err.Error(), "already exists") {
-					return nil, fmt.Errorf("failed to add schema %s: %w", schemaName, err)
-				}
-				if logger != nil {
-					logger.Debug("schema already exists", "schema", schemaName)
-				}
+			if err != nil && errors.Is(err, nats.ErrNoResponders) {
+				logger.Debug("schema registry service not available, skipping registration", slog.String("schema", schemaName))
+			} else if err != nil {
+				return nil, fmt.Errorf("failed to add schema %s: %w", schemaName, err)
 			}
 		}
 
