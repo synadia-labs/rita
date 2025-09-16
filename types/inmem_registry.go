@@ -1,70 +1,11 @@
 package types
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
-	"regexp"
 
 	"github.com/synadia-labs/rita/codec"
 )
-
-var (
-	ErrTypeNotValid      = errors.New("rita: type not valid")
-	ErrTypeNotRegistered = errors.New("rita: type not registered")
-	ErrNoTypeForStruct   = errors.New("rita: no type for struct")
-	ErrMarshal           = errors.New("rita: marshal error")
-	ErrUnmarshal         = errors.New("rita: unmarshal error")
-
-	nameRegex = regexp.MustCompile(`^[\w-]+(\.[\w-]+)*$`)
-)
-
-func validateTypeName(n string) error {
-	if !nameRegex.MatchString(n) {
-		return fmt.Errorf("%w: name %q has invalid characters", ErrTypeNotValid, n)
-	}
-	return nil
-}
-
-type Type struct {
-	Init func() any
-
-	// TODO: support schema?
-	// Schema
-}
-
-// type registryOption func(o *InMemRegistry) error
-//
-// func (f registryOption) addOption(o *InMemRegistry) error {
-// 	return f(o)
-// }
-//
-// // RegistryOption models a option when creating a type registry.
-// type RegistryOption interface {
-// 	addOption(o *InMemRegistry) error
-// }
-//
-// // Codec is a registry option to define the desired serialization codec.
-// func Codec(name string) RegistryOption {
-// 	return registryOption(func(o *InMemRegistry) error {
-// 		c, ok := codec.Codecs[name]
-// 		if !ok {
-// 			return fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, name)
-// 		}
-//
-// 		o.codec = c
-// 		return nil
-// 	})
-// }
-
-type Registry interface {
-	Codec() codec.Codec
-	Init(t string) (any, error)
-	Lookup(v any) (string, error)
-	Marshal(v any) ([]byte, error)
-	Unmarshal(b []byte, v any) error
-	UnmarshalType(b []byte, t string) (any, error)
-}
 
 // InMemRegistry is used for transparently marshaling and unmarshaling messages
 // and values from their native types to their network/storage representation.
@@ -73,7 +14,7 @@ type InMemRegistry struct {
 	codec codec.Codec
 
 	// Index of types.
-	types map[string]*Type
+	types map[string]Type
 
 	// Reflection type to the type name.
 	rtypes map[reflect.Type]string
@@ -83,7 +24,15 @@ func (r *InMemRegistry) Codec() codec.Codec {
 	return r.codec
 }
 
-func (r *InMemRegistry) validate(name string, typ *Type) error {
+type InMemType struct {
+	InitFn func() any
+}
+
+func (t InMemType) Init() func() any {
+	return t.InitFn
+}
+
+func (r *InMemRegistry) validate(name string, typ Type) error {
 	if name == "" {
 		return fmt.Errorf("%w: missing name", ErrTypeNotValid)
 	}
@@ -92,12 +41,11 @@ func (r *InMemRegistry) validate(name string, typ *Type) error {
 		return err
 	}
 
-	if typ.Init == nil {
-		return fmt.Errorf("%w: %s: init func is nil", ErrTypeNotValid, name)
+	if typ.Init() == nil {
+		return fmt.Errorf("%w: %s: missing init func", ErrTypeNotValid, name)
 	}
-
 	// Ensure the initialize value is not nil.
-	v := typ.Init()
+	v := typ.Init()()
 	if v == nil {
 		return fmt.Errorf("%w: %s: init func returns nil", ErrTypeNotValid, name)
 	}
@@ -129,11 +77,11 @@ func (r *InMemRegistry) validate(name string, typ *Type) error {
 	return nil
 }
 
-func (r *InMemRegistry) addType(name string, typ *Type) {
+func (r *InMemRegistry) addType(name string, typ Type) {
 	r.types[name] = typ
 
 	// Initialize a value, reflect the type to index.
-	v := typ.Init()
+	v := typ.Init()()
 	rt := reflect.TypeOf(v)
 
 	r.rtypes[rt] = name
@@ -147,7 +95,7 @@ func (r *InMemRegistry) Init(t string) (any, error) {
 		return nil, fmt.Errorf("%w: %s", ErrTypeNotRegistered, t)
 	}
 
-	v := x.Init()
+	v := x.Init()()
 	return v, nil
 }
 
@@ -206,10 +154,10 @@ func (r *InMemRegistry) UnmarshalType(b []byte, t string) (any, error) {
 	return v, nil
 }
 
-func NewInMemRegistry(types map[string]*Type, c codec.Codec) (Registry, error) {
+func NewInMemRegistry(types map[string]Type, c codec.Codec) (Registry, error) {
 	r := &InMemRegistry{
 		codec:  c,
-		types:  make(map[string]*Type),
+		types:  make(map[string]Type),
 		rtypes: make(map[reflect.Type]string),
 	}
 

@@ -234,12 +234,12 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 	nc, _ := nats.Connect(srv.ClientURL())
 
-	tr, err := types.NewInMemRegistry(map[string]*types.Type{
-		"order-placed": {
-			Init: func() any { return &OrderPlaced{} },
+	tr, err := types.NewInMemRegistry(map[string]types.Type{
+		"order-placed": types.InMemType{
+			InitFn: func() any { return &OrderPlaced{} },
 		},
-		"order-shipped": {
-			Init: func() any { return &OrderShipped{} },
+		"order-shipped": &types.InMemType{
+			InitFn: func() any { return &OrderShipped{} },
 		},
 	}, codec.Default)
 	is.NoErr(err)

@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestNewRegistry(t *testing.T) {
+func TestNewInMemRegistry(t *testing.T) {
 	// Base case.
 	type A struct{}
 
@@ -44,9 +44,9 @@ func TestNewRegistry(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewInMemRegistry(map[string]*Type{
-				"a": {
-					Init: test.Init,
+			_, err := NewInMemRegistry(map[string]Type{
+				"a": InMemType{
+					InitFn: test.Init,
 				},
 			}, codec.Default)
 			if err != nil && !test.Err {
@@ -61,9 +61,9 @@ func TestNewRegistry(t *testing.T) {
 func TestMarshalUnmarshal(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	ty := map[string]*Type{
-		"a": {
-			Init: func() any {
+	ty := map[string]Type{
+		"a": InMemType{
+			InitFn: func() any {
 				return &pb.A{}
 			},
 		},
@@ -110,9 +110,9 @@ func TestMarshalUnmarshal(t *testing.T) {
 func BenchmarkInit(b *testing.B) {
 	type T struct{}
 
-	r, _ := NewInMemRegistry(map[string]*Type{
-		"a": {
-			Init: func() any { return &T{} },
+	r, _ := NewInMemRegistry(map[string]Type{
+		"a": InMemType{
+			InitFn: func() any { return &T{} },
 		},
 	}, codec.Default)
 
@@ -126,9 +126,9 @@ func BenchmarkInit(b *testing.B) {
 func BenchmarkLookup(b *testing.B) {
 	type T struct{}
 
-	r, _ := NewInMemRegistry(map[string]*Type{
-		"a": {
-			Init: func() any { return &T{} },
+	r, _ := NewInMemRegistry(map[string]Type{
+		"a": InMemType{
+			InitFn: func() any { return &T{} },
 		},
 	}, codec.Default)
 
