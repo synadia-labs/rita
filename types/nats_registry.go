@@ -43,14 +43,19 @@ type NatsRegistry struct {
 }
 
 type NatsType struct {
-	InitFn      func() any
-	Name        string
-	Description string
-	DocPath     string
+	InitFn        func() any
+	AppendSubject string
+	Name          string
+	Description   string
+	DocPath       string
 }
 
 func (t NatsType) Init() func() any {
 	return t.InitFn
+}
+
+func (t NatsType) AppendSubj() string {
+	return t.AppendSubject
 }
 
 func (r *NatsRegistry) Codec() codec.Codec {
@@ -84,6 +89,14 @@ func (r *NatsRegistry) Lookup(v any) (string, error) {
 	}
 
 	return "", fmt.Errorf("%w: %s", ErrNoTypeForStruct, rt)
+}
+
+func (r *NatsRegistry) ReverseLookup(t string) (Type, error) {
+	x, ok := r.types[t]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrTypeNotRegistered, t)
+	}
+	return x, nil
 }
 
 // Marshal serializes the value to a byte slice. This call

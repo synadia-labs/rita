@@ -80,7 +80,7 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 
 	c, ok := codec.Codecs[codecName]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, codecName)
+		return nil, fmt.Errorf("%w: %s: %s", codec.ErrCodecNotRegistered, codecName, msg.Subject())
 	}
 
 	// No type registry, so assume byte slice.

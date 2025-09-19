@@ -25,11 +25,16 @@ func (r *InMemRegistry) Codec() codec.Codec {
 }
 
 type InMemType struct {
-	InitFn func() any
+	InitFn        func() any
+	AppendSubject string
 }
 
 func (t InMemType) Init() func() any {
 	return t.InitFn
+}
+
+func (t InMemType) AppendSubj() string {
+	return t.AppendSubject
 }
 
 func (r *InMemRegistry) validate(name string, typ Type) error {
@@ -108,6 +113,14 @@ func (r *InMemRegistry) Lookup(v any) (string, error) {
 	}
 
 	return t, nil
+}
+
+func (r *InMemRegistry) ReverseLookup(t string) (Type, error) {
+	x, ok := r.types[t]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrTypeNotRegistered, t)
+	}
+	return x, nil
 }
 
 // Marshal serializes the value to a byte slice. This call

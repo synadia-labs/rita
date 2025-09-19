@@ -20,6 +20,7 @@ var (
 
 type Type interface {
 	Init() func() any
+	AppendSubj() string
 
 	// TODO: support schema?
 	// Schema
@@ -29,6 +30,7 @@ type Registry interface {
 	Codec() codec.Codec
 	Init(t string) (any, error)
 	Lookup(v any) (string, error)
+	ReverseLookup(t string) (Type, error)
 	Marshal(v any) ([]byte, error)
 	Unmarshal(b []byte, v any) error
 	UnmarshalType(b []byte, t string) (any, error)

@@ -255,6 +255,29 @@ func (s *EventStore) lastMsgForSubject(ctx context.Context, subject string) (*na
 	return rep.Message, nil
 }
 
+func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) error {
+	events, err := model.Decide(cmd)
+	if err != nil {
+		return err
+	}
+
+	for _, event := range events {
+		tS, err := s.rt.types.Lookup(event.Data)
+		if err != nil {
+			return err
+		}
+		t, err := s.rt.types.ReverseLookup(tS)
+		if err != nil {
+			return err
+		}
+		_, err = s.Append(ctx, t.AppendSubj(), []*Event{event})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Evolve loads events and evolves a model of state. The sequence of the
 // last event that evolved the state is returned, including when an error
 // occurs.
@@ -308,12 +331,12 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	defer msgCtx.Stop()
 
 	// Skip first.
-	if o.afterSeq != nil {
-		_, err := msgCtx.Next()
-		if err != nil {
-			return 0, err
-		}
-	}
+	// if o.afterSeq != nil {
+	// 	_, err := msgCtx.Next()
+	// 	if err != nil {
+	// 		return 0, err
+	// 	}
+	// }
 
 	var lastSeq uint64
 	for {
@@ -331,7 +354,6 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			return lastSeq, err
 		}
 		lastSeq = event.sequence
-
 		if event.sequence == lastMsg.Sequence {
 			break
 		}

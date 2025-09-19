@@ -7,6 +7,7 @@ type Command struct {
 	Time time.Time
 	Type string
 	Data any
+	Meta map[string]string
 }
 
 type Decider interface {
