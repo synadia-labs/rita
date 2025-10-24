@@ -69,7 +69,8 @@ type Event struct {
 }
 
 type appendOpts struct {
-	expSeq *uint64
+	expSubj string
+	expSeq  *uint64
 }
 
 type appendOptFn func(o *appendOpts) error
@@ -83,11 +84,21 @@ type AppendOption interface {
 	appendOpt(o *appendOpts) error
 }
 
-// ExpectSequence indicates that the expected sequence of the subject sequence should
+// ExpectSequence indicates that the expected sequence of the implicit subject should
 // be the value provided. If not, a conflict is indicated.
 func ExpectSequence(seq uint64) AppendOption {
 	return appendOptFn(func(o *appendOpts) error {
 		o.expSeq = &seq
+		return nil
+	})
+}
+
+// ExpectSequenceSubject indicates that the expected sequence of the explicit subject should
+// be the value provided. If not, a conflict is indicated.
+func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
+	return appendOptFn(func(o *appendOpts) error {
+		o.expSeq = &seq
+		o.expSubj = subject
 		return nil
 	})
 }
@@ -358,8 +369,14 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 			jetstream.WithExpectStream(s.name),
 		}
 
-		if i == 0 && o.expSeq != nil {
-			popts = append(popts, jetstream.WithExpectLastSequencePerSubject(*o.expSeq))
+		if i == 0 {
+			if o.expSeq != nil {
+				if o.expSubj == "" {
+					popts = append(popts, jetstream.WithExpectLastSequencePerSubject(*o.expSeq))
+				} else {
+					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, o.expSubj))
+				}
+			}
 		}
 
 		e, err := s.wrapEvent(event)
