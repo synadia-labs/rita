@@ -105,6 +105,7 @@ func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 
 type evolveOpts struct {
 	afterSeq *uint64
+	upToSeq  *uint64
 }
 
 type evolveOptFn func(o *evolveOpts) error
@@ -125,6 +126,15 @@ type EvolveOption interface {
 func AfterSequence(seq uint64) EvolveOption {
 	return evolveOptFn(func(o *evolveOpts) error {
 		o.afterSeq = &seq
+		return nil
+	})
+}
+
+// UpToSequence specifies the sequence of the last event that should be fetched.
+// This is useful to control how much replay is performed when evolving a state.
+func UpToSequence(seq uint64) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.upToSeq = &seq
 		return nil
 	})
 }
@@ -338,17 +348,29 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 			return 0, err
 		}
 
+		// If up to sequence is set, break if the event sequence is greater than the up to sequence.
+		// This check is here in case there is a gap between sequence numbers.
+		if o.upToSeq != nil && event.sequence > *o.upToSeq {
+			break
+		}
+
 		if err := model.Evolve(event); err != nil {
 			return lastSeq, err
 		}
 		lastSeq = event.sequence
 
-		if event.sequence == lastMsg.Sequence {
+		// Check if we've reached the up to sequence.
+		if o.upToSeq != nil && lastSeq == *o.upToSeq {
+			break
+		}
+
+		// Check if we've reached the last message in the stream.
+		if lastSeq == lastMsg.Sequence {
 			break
 		}
 	}
 
-	return lastMsg.Sequence, nil
+	return lastSeq, nil
 }
 
 // Append appends a one or more events to the subject's event sequence.
