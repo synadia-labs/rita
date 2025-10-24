@@ -331,12 +331,12 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	defer msgCtx.Stop()
 
 	// Skip first.
-	// if o.afterSeq != nil {
-	// 	_, err := msgCtx.Next()
-	// 	if err != nil {
-	// 		return 0, err
-	// 	}
-	// }
+	if o.afterSeq != nil && *o.afterSeq > 0 {
+		_, err := msgCtx.Next()
+		if err != nil {
+			return 0, err
+		}
+	}
 
 	var lastSeq uint64
 	for {
@@ -420,6 +420,12 @@ func (s *EventStore) Create(config *jetstream.StreamConfig) error {
 	}
 
 	_, err := s.rt.js.CreateStream(s.rt.ctx, *config)
+	if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
+		_, err = s.rt.js.UpdateStream(s.rt.ctx, *config)
+		if err == nil {
+			return nil
+		}
+	}
 	return err
 }
 
