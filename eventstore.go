@@ -44,6 +44,8 @@ type Event struct {
 	// for de-duplication.
 	ID string
 
+	Entity string
+
 	// Time is the time of when the event occurred which may be different
 	// from the time the event is appended to the store. If no time is provided,
 	// the current local time will be used.
@@ -276,6 +278,27 @@ func (s *EventStore) lastMsgForSubject(ctx context.Context, subject string) (*na
 	return rep.Message, nil
 }
 
+func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) error {
+	events, err := model.Decide(cmd)
+	if err != nil {
+		return err
+	}
+
+	for _, event := range events {
+		_, err := s.rt.types.Lookup(event.Data)
+		if err != nil {
+			return err
+		}
+
+		_, err = s.Append(ctx, s.rt.buildSubjFn(event), []*Event{event})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Evolve loads events and evolves a model of state. The sequence of the
 // last event that evolved the state is returned, including when an error
 // occurs.
@@ -329,7 +352,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	defer msgCtx.Stop()
 
 	// Skip first.
-	if o.afterSeq != nil {
+	if o.afterSeq != nil && *o.afterSeq > 0 {
 		_, err := msgCtx.Next()
 		if err != nil {
 			return 0, err

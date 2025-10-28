@@ -57,11 +57,19 @@ func Logger(logger *slog.Logger) RitaOption {
 	})
 }
 
+func BuildSubjectFn(fn func(e *Event) string) RitaOption {
+	return ritaOption(func(o *Rita) error {
+		o.buildSubjFn = fn
+		return nil
+	})
+}
+
 type Rita struct {
-	ctx    context.Context
-	logger *slog.Logger
-	nc     *nats.Conn
-	js     jetstream.JetStream
+	ctx         context.Context
+	logger      *slog.Logger
+	nc          *nats.Conn
+	js          jetstream.JetStream
+	buildSubjFn func(e *Event) string
 
 	id    id.ID
 	clock clock.Clock
@@ -152,11 +160,15 @@ func New(ctx context.Context, nc *nats.Conn, opts ...RitaOption) (*Rita, error) 
 	}
 
 	rt := &Rita{
-		ctx:   ctx,
-		nc:    nc,
-		js:    js,
-		id:    id.NUID,
-		clock: clock.Time,
+		ctx:    ctx,
+		nc:     nc,
+		logger: slog.Default(),
+		js:     js,
+		id:     id.NUID,
+		clock:  clock.Time,
+		buildSubjFn: func(e *Event) string {
+			return fmt.Sprintf("%s-%s", e.Type, e.Entity)
+		},
 	}
 
 	for _, o := range opts {
