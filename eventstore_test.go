@@ -226,6 +226,38 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 2)
 			},
 		},
+		{
+			"state-up-to-sequence",
+			func(t *testing.T, es *EventStore, _ string) {
+				ctx := context.Background()
+
+				events := []*Event{
+					{Data: &OrderPlaced{ID: "1"}},
+					{Data: &OrderPlaced{ID: "2"}},
+					{Data: &OrderPlaced{ID: "3"}},
+					{Data: &OrderShipped{ID: "2"}},
+				}
+
+				_, err := es.Append(ctx, "orders.*", events)
+				is.NoErr(err)
+
+				var stats OrderStats
+				seq, err := es.Evolve(ctx, "orders.*", &stats, UpToSequence(2))
+				is.NoErr(err)
+				is.Equal(seq, uint64(2))
+
+				is.Equal(stats.OrdersPlaced, 2)
+				is.Equal(stats.OrdersShipped, 0)
+
+				var stats2 OrderStats
+				seq, err = es.Evolve(ctx, "orders.*", &stats2, AfterSequence(1), UpToSequence(3))
+				is.NoErr(err)
+				is.Equal(seq, uint64(3))
+
+				is.Equal(stats2.OrdersPlaced, 2)
+				is.Equal(stats2.OrdersShipped, 0)
+			},
+		},
 	}
 
 	srv := testutil.NewNatsServer(-1)
