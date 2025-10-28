@@ -44,6 +44,8 @@ type Event struct {
 	// for de-duplication.
 	ID string
 
+	// Identifier for specific entities.  Can be used to determine if
+	// an is related to a specific entity/node/endpoint/agent/etc.
 	Entity string
 
 	// Time is the time of when the event occurred which may be different
