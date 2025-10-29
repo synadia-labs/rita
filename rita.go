@@ -57,7 +57,7 @@ func Logger(logger *slog.Logger) RitaOption {
 	})
 }
 
-func BuildSubjectFn(fn func(e *Event) string) RitaOption {
+func EventSubject(fn func(e *Event) string) RitaOption {
 	return ritaOption(func(o *Rita) error {
 		o.buildSubjFn = fn
 		return nil
