@@ -14,6 +14,7 @@ import (
 )
 
 const (
+	eventEntityHdr     = "rita-entity"
 	eventTypeHdr       = "rita-type"
 	eventTimeHdr       = "rita-time"
 	eventCodecHdr      = "rita-codec"
@@ -22,10 +23,10 @@ const (
 )
 
 var (
-	ErrSequenceConflict  = errors.New("rita: sequence conflict")
-	ErrEventIDRequired   = errors.New("rita: event id required")
-	ErrTimeFieldRequired = errors.New("rita: event time required")
-	ErrEventTypeRequired = errors.New("rita: event type required")
+	ErrSequenceConflict    = errors.New("rita: sequence conflict")
+	ErrEventDataRequired   = errors.New("rita: event data required")
+	ErrEventEntityRequired = errors.New("rita: event entity required")
+	ErrEventTypeRequired   = errors.New("rita: event type required")
 )
 
 // Validator can be optionally implemented by user-defined types and will be
@@ -163,22 +164,48 @@ type natsStoredMsg struct {
 	Sequence uint64 `json:"seq"`
 }
 
+type eventStoreOption func(o *EventStore) error
+
+func (f eventStoreOption) addOption(o *EventStore) error {
+	return f(o)
+}
+
+// RitaOption models a option when creating a type registry.
+type EventStoreOption interface {
+	addOption(o *EventStore) error
+}
+
+// EventSubject sets a function that derives the suffix of the subject
+// for an event. By default, it is `<entity>.<type>` and appended to the
+// store name.
+func EventSubject(fn func(e *Event) string) EventStoreOption {
+	return eventStoreOption(func(o *EventStore) error {
+		o.subjectFunc = fn
+		return nil
+	})
+}
+
 // EventStore provides event store semantics over a NATS stream.
 type EventStore struct {
-	name string
-	rt   *Rita
+	name        string
+	rt          *Rita
+	subjectFunc func(event *Event) string
 }
 
 // wrapEvent wraps a user-defined event into the Event envelope. It performs
 // validation to ensure all the properties are either defined or defaults are set.
 func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 	if event.Data == nil {
-		return nil, fmt.Errorf("event data is nil")
+		return nil, ErrEventDataRequired
+	}
+
+	if event.Entity == "" {
+		return nil, ErrEventEntityRequired
 	}
 
 	if s.rt.types == nil {
 		if event.Type == "" {
-			return nil, errors.New("event type is not defined")
+			return nil, ErrEventTypeRequired
 		}
 	} else {
 		t, err := s.rt.types.Lookup(event.Data)
@@ -242,6 +269,7 @@ func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) 
 	msg.Header.Set(eventTypeHdr, event.Type)
 	msg.Header.Set(eventTimeHdr, event.Time.Format(eventTimeFormat))
 	msg.Header.Set(eventCodecHdr, codecName)
+	msg.Header.Set(eventEntityHdr, event.Entity)
 
 	for k, v := range event.Meta {
 		msg.Header.Set(fmt.Sprintf("%s%s", eventMetaPrefixHdr, k), v)
@@ -286,19 +314,8 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) er
 		return err
 	}
 
-	for _, event := range events {
-		_, err := s.rt.types.Lookup(event.Data)
-		if err != nil {
-			return err
-		}
-
-		_, err = s.Append(ctx, s.rt.buildSubjFn(event), []*Event{event})
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+	_, err = s.Append(ctx, events)
+	return err
 }
 
 // Evolve loads events and evolves a model of state. The sequence of the
@@ -400,7 +417,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 
 // Append appends a one or more events to the subject's event sequence.
 // It returns the resulting sequence number of the last appended event.
-func (s *EventStore) Append(ctx context.Context, subject string, events []*Event, opts ...AppendOption) (uint64, error) {
+func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...AppendOption) (uint64, error) {
 	// Configure opts.
 	var o appendOpts
 	for _, opt := range opts {
@@ -431,6 +448,7 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 			return 0, err
 		}
 
+		subject := s.subjectFunc(e)
 		msg, err := s.packEvent(subject, e)
 		if err != nil {
 			return 0, err
@@ -456,10 +474,7 @@ func (s *EventStore) Create(config *jetstream.StreamConfig) error {
 		config = &jetstream.StreamConfig{}
 	}
 	config.Name = s.name
-
-	if len(config.Subjects) == 0 {
-		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
-	}
+	config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
 
 	_, err := s.rt.js.CreateStream(s.rt.ctx, *config)
 	return err

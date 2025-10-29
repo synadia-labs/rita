@@ -57,19 +57,12 @@ func Logger(logger *slog.Logger) RitaOption {
 	})
 }
 
-func EventSubject(fn func(e *Event) string) RitaOption {
-	return ritaOption(func(o *Rita) error {
-		o.buildSubjFn = fn
-		return nil
-	})
-}
-
 type Rita struct {
 	ctx         context.Context
 	logger      *slog.Logger
 	nc          *nats.Conn
 	js          jetstream.JetStream
-	buildSubjFn func(e *Event) string
+	subjectFunc func(e *Event) string
 
 	id    id.ID
 	clock clock.Clock
@@ -82,7 +75,7 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 	codecName := msg.Headers().Get(eventCodecHdr)
 
 	var (
-		data interface{}
+		data any
 		err  error
 	)
 
@@ -145,11 +138,25 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-func (r *Rita) EventStore(name string) *EventStore {
-	return &EventStore{
+func (r *Rita) EventStore(name string, opts ...EventStoreOption) (*EventStore, error) {
+	e := &EventStore{
 		name: name,
 		rt:   r,
 	}
+
+	for _, o := range opts {
+		if err := o.addOption(e); err != nil {
+			return nil, err
+		}
+	}
+
+	if r.subjectFunc == nil {
+		e.subjectFunc = func(e *Event) string {
+			return fmt.Sprintf("%s.%s.%s", name, e.Entity, e.Type)
+		}
+	}
+
+	return e, nil
 }
 
 // New initializes a new Rita instance with a NATS connection.
@@ -166,9 +173,6 @@ func New(ctx context.Context, nc *nats.Conn, opts ...RitaOption) (*Rita, error) 
 		js:     js,
 		id:     id.NUID,
 		clock:  clock.Time,
-		buildSubjFn: func(e *Event) string {
-			return fmt.Sprintf("%s-%s", e.Type, e.Entity)
-		},
 	}
 
 	for _, o := range opts {
