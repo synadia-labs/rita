@@ -300,3 +300,27 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		})
 	}
 }
+
+func TestParseSubjectPrefix(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	prefix, err := parseSubjectPrefix("events.>")
+	is.NoErr(err)
+	is.Equal(prefix, "events")
+
+	prefix, err = parseSubjectPrefix("events.*.*.*")
+	is.NoErr(err)
+	is.Equal(prefix, "events")
+
+	_, err = parseSubjectPrefix("events")
+	is.Err(err, nil)
+
+	_, err = parseSubjectPrefix("events.>.*")
+	is.Err(err, nil)
+
+	prefix, err = parseSubjectPrefix("events.*.*")
+	is.Err(err, nil)
+
+	prefix, err = parseSubjectPrefix("events.*.*.*.*")
+	is.Err(err, nil)
+}

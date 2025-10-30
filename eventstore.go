@@ -476,7 +476,6 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 				if o.expSubj == "" {
 					idx := strings.LastIndex(subject, ".")
 					expSubj := fmt.Sprintf("%s.*", subject[:idx])
-					// Since the event type is part of the
 					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
 				} else {
 					expSubj := fmt.Sprintf("%s.%s", s.subjectPrefix, o.expSubj)
@@ -524,7 +523,8 @@ func parseSubjectPrefix(s string) (string, error) {
 			return "", fmt.Errorf("wildcards not allowed before '*.*.*'")
 		}
 
-		return s[:len(s)-4], nil
+		// Three wildcard tokens and dots.
+		return s[:len(s)-6], nil
 	}
 
 	return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
