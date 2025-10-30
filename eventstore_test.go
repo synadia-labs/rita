@@ -318,9 +318,9 @@ func TestParseSubjectPrefix(t *testing.T) {
 	_, err = parseSubjectPrefix("events.>.*")
 	is.Err(err, nil)
 
-	prefix, err = parseSubjectPrefix("events.*.*")
+	_, err = parseSubjectPrefix("events.*.*")
 	is.Err(err, nil)
 
-	prefix, err = parseSubjectPrefix("events.*.*.*.*")
+	_, err = parseSubjectPrefix("events.*.*.*.*")
 	is.Err(err, nil)
 }
