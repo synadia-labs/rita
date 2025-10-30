@@ -133,7 +133,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 					Data:   &OrderShipped{ID: "123"},
 				}
 
-				seq, err = es.Append(ctx, []*Event{event2} /* ExpectSequence(1) TODO */)
+				seq, err = es.Append(ctx, []*Event{event2}, ExpectSequence(1))
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 

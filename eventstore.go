@@ -106,8 +106,12 @@ func ExpectSequence(seq uint64) AppendOption {
 // be the value provided. If not, a conflict is indicated.
 func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 	return appendOptFn(func(o *appendOpts) error {
+		pattern, err := parseEvolvePattern(subject)
+		if err != nil {
+			return err
+		}
 		o.expSeq = &seq
-		o.expSubj = subject
+		o.expSubj = pattern
 		return nil
 	})
 }
@@ -456,16 +460,6 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 			jetstream.WithExpectStream(s.name),
 		}
 
-		if i == 0 {
-			if o.expSeq != nil {
-				if o.expSubj == "" {
-					popts = append(popts, jetstream.WithExpectLastSequencePerSubject(*o.expSeq))
-				} else {
-					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, o.expSubj))
-				}
-			}
-		}
-
 		e, err := s.wrapEvent(event)
 		if err != nil {
 			return 0, err
@@ -475,6 +469,20 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 		msg, err := s.packEvent(subject, e)
 		if err != nil {
 			return 0, err
+		}
+
+		if i == 0 {
+			if o.expSeq != nil {
+				if o.expSubj == "" {
+					idx := strings.LastIndex(subject, ".")
+					expSubj := fmt.Sprintf("%s.*", subject[:idx])
+					// Since the event type is part of the
+					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+				} else {
+					expSubj := fmt.Sprintf("%s.%s", s.subjectPrefix, o.expSubj)
+					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+				}
+			}
 		}
 
 		// TODO: add retry logic in case of intermittent errors?
