@@ -2,7 +2,6 @@ package rita
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/nats-io/nats.go"
@@ -53,24 +52,26 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	r, err := New(t.Context(), nc)
 	is.NoErr(err)
 
-	es := r.EventStore("orders")
-	err = es.Create(&jetstream.StreamConfig{
+	ctx := context.Background()
+	es, err := r.EventStore(ctx, "store")
+	is.NoErr(err)
+
+	err = es.Create(ctx, &jetstream.StreamConfig{
 		Storage: jetstream.MemoryStorage,
 	})
 	is.NoErr(err)
 
-	ctx := context.Background()
-
-	seq, err := es.Append(ctx, "orders.1", []*Event{{
-		Type: "foo",
-		Data: []byte("hello"),
+	seq, err := es.Append(ctx, []*Event{{
+		Entity: "order.1",
+		Type:   "foo",
+		Data:   []byte("hello"),
 	}})
 	is.NoErr(err)
 	is.Equal(seq, uint64(1))
 
 	var events eventSlice
 
-	_, err = es.Evolve(ctx, "orders.1", &events)
+	_, err = es.Evolve(ctx, "order", &events)
 	is.NoErr(err)
 	is.Equal(events[0].Type, "foo")
 	is.Equal(events[0].Data, []byte("hello"))
@@ -81,21 +82,22 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 	tests := []struct {
 		Name string
-		Run  func(t *testing.T, es *EventStore, subject string)
+		Run  func(t *testing.T, es *EventStore)
 	}{
 		{
 			"append-load-no-occ",
-			func(t *testing.T, es *EventStore, subject string) {
+			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 				devent := OrderPlaced{ID: "123"}
-				seq, err := es.Append(ctx, subject, []*Event{{
-					Data: &devent,
+				seq, err := es.Append(ctx, []*Event{{
+					Entity: "order.123",
+					Data:   &devent,
 				}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, subject, &events)
+				lseq, err := es.Evolve(ctx, "order", &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -111,30 +113,32 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		},
 		{
 			"append-load-with-occ",
-			func(t *testing.T, es *EventStore, subject string) {
+			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				event1 := &Event{
-					Data: &OrderPlaced{ID: "123"},
+					Entity: "order.123",
+					Data:   &OrderPlaced{ID: "123"},
 					Meta: map[string]string{
 						"geo": "eu",
 					},
 				}
 
-				seq, err := es.Append(ctx, subject, []*Event{event1}, ExpectSequence(0))
+				seq, err := es.Append(ctx, []*Event{event1}, ExpectSequence(0))
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
 				event2 := &Event{
-					Data: &OrderShipped{ID: "123"},
+					Entity: "order.123",
+					Data:   &OrderShipped{ID: "123"},
 				}
 
-				seq, err = es.Append(ctx, subject, []*Event{event2}, ExpectSequence(1))
+				seq, err = es.Append(ctx, []*Event{event2}, ExpectSequence(1))
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, subject, &events)
+				lseq, err := es.Evolve(ctx, "order", &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -143,19 +147,19 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		},
 		{
 			"append-load-partial",
-			func(t *testing.T, es *EventStore, subject string) {
+			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
-				seq, err := es.Append(ctx, subject, []*Event{{Data: &OrderPlaced{ID: "123"}}}, ExpectSequence(0))
+				seq, err := es.Append(ctx, []*Event{{Entity: "order.123", Data: &OrderPlaced{ID: "123"}}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
-				seq, err = es.Append(ctx, subject, []*Event{{Data: &OrderShipped{ID: "123"}}}, ExpectSequence(1))
+				seq, err = es.Append(ctx, []*Event{{Entity: "order.123", Data: &OrderShipped{ID: "123"}}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, subject, &events, AfterSequence(1))
+				lseq, err := es.Evolve(ctx, "order", &events, AfterSequence(1))
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -165,47 +169,48 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		},
 		{
 			"duplicate-append",
-			func(t *testing.T, es *EventStore, subject string) {
+			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				e := &Event{
-					ID:   id.NUID.New(),
-					Data: &OrderPlaced{ID: "123"},
+					ID:     id.NUID.New(),
+					Entity: "order.123",
+					Data:   &OrderPlaced{ID: "123"},
 				}
 
-				seq, err := es.Append(ctx, subject, []*Event{e})
+				seq, err := es.Append(ctx, []*Event{e})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
 				// Append same event with same ID, expect the same response.
-				seq, err = es.Append(ctx, subject, []*Event{e})
+				seq, err = es.Append(ctx, []*Event{e})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
 				// Append same event with same ID, expect the same response... again.
-				seq, err = es.Append(ctx, subject, []*Event{e})
+				seq, err = es.Append(ctx, []*Event{e})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 			},
 		},
 		{
 			"state",
-			func(t *testing.T, es *EventStore, _ string) {
+			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				events := []*Event{
-					{Data: &OrderPlaced{ID: "1"}},
-					{Data: &OrderPlaced{ID: "2"}},
-					{Data: &OrderPlaced{ID: "3"}},
-					{Data: &OrderShipped{ID: "2"}},
+					{Entity: "order.1", Data: &OrderPlaced{ID: "1"}},
+					{Entity: "order.2", Data: &OrderPlaced{ID: "2"}},
+					{Entity: "order.3", Data: &OrderPlaced{ID: "3"}},
+					{Entity: "order.2", Data: &OrderShipped{ID: "2"}},
 				}
 
-				seq, err := es.Append(ctx, "orders.*", events)
+				seq, err := es.Append(ctx, events)
 				is.NoErr(err)
 				is.Equal(seq, uint64(4))
 
 				var stats OrderStats
-				seq2, err := es.Evolve(ctx, "orders.*", &stats)
+				seq2, err := es.Evolve(ctx, "order", &stats)
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -213,12 +218,12 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 1)
 
 				// New event to test out AfterSequence.
-				e5 := &Event{Data: &OrderShipped{ID: "1"}}
-				seq, err = es.Append(ctx, "orders.*", []*Event{e5})
+				e5 := &Event{Entity: "order.1", Data: &OrderShipped{ID: "1"}}
+				seq, err = es.Append(ctx, []*Event{e5})
 				is.NoErr(err)
 				is.Equal(seq, uint64(5))
 
-				seq2, err = es.Evolve(ctx, "orders.*", &stats, AfterSequence(seq2))
+				seq2, err = es.Evolve(ctx, "order", &stats, AfterSequence(seq2))
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -228,21 +233,21 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		},
 		{
 			"state-up-to-sequence",
-			func(t *testing.T, es *EventStore, _ string) {
+			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				events := []*Event{
-					{Data: &OrderPlaced{ID: "1"}},
-					{Data: &OrderPlaced{ID: "2"}},
-					{Data: &OrderPlaced{ID: "3"}},
-					{Data: &OrderShipped{ID: "2"}},
+					{Entity: "order.1", Data: &OrderPlaced{ID: "1"}},
+					{Entity: "order.2", Data: &OrderPlaced{ID: "2"}},
+					{Entity: "order.3", Data: &OrderPlaced{ID: "3"}},
+					{Entity: "order.2", Data: &OrderShipped{ID: "2"}},
 				}
 
-				_, err := es.Append(ctx, "orders.*", events)
+				_, err := es.Append(ctx, events)
 				is.NoErr(err)
 
 				var stats OrderStats
-				seq, err := es.Evolve(ctx, "orders.*", &stats, UpToSequence(2))
+				seq, err := es.Evolve(ctx, "order", &stats, UpToSequence(2))
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
@@ -250,7 +255,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 0)
 
 				var stats2 OrderStats
-				seq, err = es.Evolve(ctx, "orders.*", &stats2, AfterSequence(1), UpToSequence(3))
+				seq, err = es.Evolve(ctx, "order", &stats2, AfterSequence(1), UpToSequence(3))
 				is.NoErr(err)
 				is.Equal(seq, uint64(3))
 
@@ -278,19 +283,44 @@ func TestEventStoreWithRegistry(t *testing.T) {
 	r, err := New(t.Context(), nc, TypeRegistry(tr))
 	is.NoErr(err)
 
-	for i, test := range tests {
+	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
-			es := r.EventStore("orders")
+			ctx := context.Background()
+			es, err := r.EventStore(ctx, "store")
+			is.NoErr(err)
 
 			// Recreate the store for each test.
-			_ = es.Delete()
-			err := es.Create(&jetstream.StreamConfig{
+			_ = es.Delete(ctx)
+			err = es.Create(ctx, &jetstream.StreamConfig{
 				Storage: jetstream.MemoryStorage,
 			})
 			is.NoErr(err)
 
-			subject := fmt.Sprintf("orders.%d", i)
-			test.Run(t, es, subject)
+			test.Run(t, es)
 		})
 	}
+}
+
+func TestParseSubjectPrefix(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	prefix, err := parseSubjectPrefix("events.>")
+	is.NoErr(err)
+	is.Equal(prefix, "events")
+
+	prefix, err = parseSubjectPrefix("events.*.*.*")
+	is.NoErr(err)
+	is.Equal(prefix, "events")
+
+	_, err = parseSubjectPrefix("events")
+	is.Err(err, nil)
+
+	_, err = parseSubjectPrefix("events.>.*")
+	is.Err(err, nil)
+
+	_, err = parseSubjectPrefix("events.*.*")
+	is.Err(err, nil)
+
+	_, err = parseSubjectPrefix("events.*.*.*.*")
+	is.Err(err, nil)
 }
