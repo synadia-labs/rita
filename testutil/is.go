@@ -18,18 +18,18 @@ type Is struct {
 func (is *Is) Equal(a, b any) {
 	if d := cmp.Diff(a, b); d != "" {
 		is.t.Helper()
-		is.t.Error(d)
+		is.t.Fatal(d)
 	}
 }
 
 func (is *Is) Err(err error, baseErr error) {
 	if err == nil {
 		is.t.Helper()
-		is.t.Error("expected error, got none")
+		is.t.Fatal("expected error, got none")
 	} else if baseErr != nil {
 		if !errors.Is(err, baseErr) {
 			is.t.Helper()
-			is.t.Errorf("expected error of type %T, not %T", baseErr, err)
+			is.t.Fatalf("expected error of type %T, not %T", baseErr, err)
 		}
 	}
 }
@@ -37,13 +37,13 @@ func (is *Is) Err(err error, baseErr error) {
 func (is *Is) NoErr(err error) {
 	if err != nil {
 		is.t.Helper()
-		is.t.Error(err)
+		is.t.Fatal(err)
 	}
 }
 
 func (is *Is) True(t bool) {
 	if !t {
 		is.t.Helper()
-		is.t.Error("expected true")
+		is.t.Fatal("expected true")
 	}
 }

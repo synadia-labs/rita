@@ -2,6 +2,7 @@ package rita
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -74,7 +75,7 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 	codecName := msg.Headers().Get(eventCodecHdr)
 
 	var (
-		data interface{}
+		data any
 		err  error
 	)
 
@@ -137,11 +138,29 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-func (r *Rita) EventStore(name string) *EventStore {
-	return &EventStore{
+func (r *Rita) EventStore(ctx context.Context, name string) (*EventStore, error) {
+	e := &EventStore{
 		name: name,
 		rt:   r,
 	}
+
+	// If the stream exists, extract the subject prefix, otherwise this
+	// will be done on create.
+	str, err := r.js.Stream(ctx, name)
+	if err == nil {
+		prefix, err := parseSubjectPrefix(str.CachedInfo().Config.Subjects[0])
+		if err != nil {
+			return nil, err
+		}
+		e.subjectPrefix = prefix
+		e.subjectFunc = func(event *Event) string {
+			return fmt.Sprintf("%s.%s.%s", prefix, event.Entity, event.Type)
+		}
+	} else if !errors.Is(err, jetstream.ErrStreamNotFound) {
+		return nil, err
+	}
+
+	return e, nil
 }
 
 // New initializes a new Rita instance with a NATS connection.
@@ -152,11 +171,12 @@ func New(ctx context.Context, nc *nats.Conn, opts ...RitaOption) (*Rita, error) 
 	}
 
 	rt := &Rita{
-		ctx:   ctx,
-		nc:    nc,
-		js:    js,
-		id:    id.NUID,
-		clock: clock.Time,
+		ctx:    ctx,
+		nc:     nc,
+		logger: slog.Default(),
+		js:     js,
+		id:     id.NUID,
+		clock:  clock.Time,
 	}
 
 	for _, o := range opts {

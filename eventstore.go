@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 )
 
 const (
+	eventEntityHdr     = "rita-entity"
 	eventTypeHdr       = "rita-type"
 	eventTimeHdr       = "rita-time"
 	eventCodecHdr      = "rita-codec"
@@ -22,10 +25,11 @@ const (
 )
 
 var (
-	ErrSequenceConflict  = errors.New("rita: sequence conflict")
-	ErrEventIDRequired   = errors.New("rita: event id required")
-	ErrTimeFieldRequired = errors.New("rita: event time required")
-	ErrEventTypeRequired = errors.New("rita: event type required")
+	ErrSequenceConflict    = errors.New("rita: sequence conflict")
+	ErrEventDataRequired   = errors.New("rita: event data required")
+	ErrEventEntityRequired = errors.New("rita: event entity required")
+	ErrEventEntityInvalid  = fmt.Errorf("rite: event entity invalid")
+	ErrEventTypeRequired   = errors.New("rita: event type required")
 )
 
 // Validator can be optionally implemented by user-defined types and will be
@@ -43,6 +47,11 @@ type Event struct {
 	// ID of the event. This will be used as the NATS msg ID
 	// for de-duplication.
 	ID string
+
+	// Identifier for specific entities.  Can be used to determine if
+	// an is related to a specific entity/node/endpoint/agent/etc.
+	// The format must be two tokens, e.g. "node.1234".
+	Entity string
 
 	// Time is the time of when the event occurred which may be different
 	// from the time the event is appended to the store. If no time is provided,
@@ -97,8 +106,12 @@ func ExpectSequence(seq uint64) AppendOption {
 // be the value provided. If not, a conflict is indicated.
 func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 	return appendOptFn(func(o *appendOpts) error {
+		pattern, err := parseEvolvePattern(subject)
+		if err != nil {
+			return err
+		}
 		o.expSeq = &seq
-		o.expSubj = subject
+		o.expSubj = pattern
 		return nil
 	})
 }
@@ -161,20 +174,31 @@ type natsStoredMsg struct {
 
 // EventStore provides event store semantics over a NATS stream.
 type EventStore struct {
-	name string
-	rt   *Rita
+	name          string
+	rt            *Rita
+	subjectPrefix string
+	subjectFunc   func(event *Event) string
 }
+
+var entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
 
 // wrapEvent wraps a user-defined event into the Event envelope. It performs
 // validation to ensure all the properties are either defined or defaults are set.
 func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 	if event.Data == nil {
-		return nil, fmt.Errorf("event data is nil")
+		return nil, ErrEventDataRequired
+	}
+
+	if event.Entity == "" {
+		return nil, ErrEventEntityRequired
+	}
+	if !entityRegex.MatchString(event.Entity) {
+		return nil, ErrEventEntityInvalid
 	}
 
 	if s.rt.types == nil {
 		if event.Type == "" {
-			return nil, errors.New("event type is not defined")
+			return nil, ErrEventTypeRequired
 		}
 	} else {
 		t, err := s.rt.types.Lookup(event.Data)
@@ -238,6 +262,7 @@ func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) 
 	msg.Header.Set(eventTypeHdr, event.Type)
 	msg.Header.Set(eventTimeHdr, event.Time.Format(eventTimeFormat))
 	msg.Header.Set(eventCodecHdr, codecName)
+	msg.Header.Set(eventEntityHdr, event.Entity)
 
 	for k, v := range event.Meta {
 		msg.Header.Set(fmt.Sprintf("%s%s", eventMetaPrefixHdr, k), v)
@@ -276,10 +301,54 @@ func (s *EventStore) lastMsgForSubject(ctx context.Context, subject string) (*na
 	return rep.Message, nil
 }
 
+func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) error {
+	events, err := model.Decide(cmd)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.Append(ctx, events)
+	return err
+}
+
+func parseEvolvePattern(subject string) (string, error) {
+	toks := strings.Split(subject, ".")
+	if len(toks) < 1 {
+		return "", fmt.Errorf("subject must have at least an entity type")
+	}
+	if len(toks) > 3 {
+		return "", fmt.Errorf("subject can have at most three tokens")
+	}
+
+	ntoks := make([]string, 3)
+	for i := range ntoks {
+		if i < len(toks) {
+			ntoks[i] = toks[i]
+		} else {
+			ntoks[i] = "*"
+		}
+	}
+
+	return fmt.Sprintf("%s.%s.%s", ntoks[0], ntoks[1], ntoks[2]), nil
+}
+
 // Evolve loads events and evolves a model of state. The sequence of the
 // last event that evolved the state is returned, including when an error
-// occurs.
-func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...EvolveOption) (uint64, error) {
+// occurs. Note, the pattern can be several forms depending on the need.
+// The full template is `<entity-type>.<entity-id>.<event-type>`. If only
+// the entity type is provided, all events for all entities of that type
+// will be loaded. If the entity type and entity ID are provided, all events
+// for that specific entity will be loaded. If the full subject is provided,
+// only events of that specific type for that specific entity will be loaded.
+// Wildcards can be used as well.
+func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, opts ...EvolveOption) (uint64, error) {
+	pattern, err := parseEvolvePattern(pattern)
+	if err != nil {
+		return 0, err
+	}
+
+	subject := fmt.Sprintf("%s.%s", s.subjectPrefix, pattern)
+
 	// Configure opts.
 	var o evolveOpts
 	for _, opt := range opts {
@@ -329,7 +398,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 	defer msgCtx.Stop()
 
 	// Skip first.
-	if o.afterSeq != nil {
+	if o.afterSeq != nil && *o.afterSeq > 0 {
 		_, err := msgCtx.Next()
 		if err != nil {
 			return 0, err
@@ -375,7 +444,7 @@ func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, 
 
 // Append appends a one or more events to the subject's event sequence.
 // It returns the resulting sequence number of the last appended event.
-func (s *EventStore) Append(ctx context.Context, subject string, events []*Event, opts ...AppendOption) (uint64, error) {
+func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...AppendOption) (uint64, error) {
 	// Configure opts.
 	var o appendOpts
 	for _, opt := range opts {
@@ -391,24 +460,28 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 			jetstream.WithExpectStream(s.name),
 		}
 
-		if i == 0 {
-			if o.expSeq != nil {
-				if o.expSubj == "" {
-					popts = append(popts, jetstream.WithExpectLastSequencePerSubject(*o.expSeq))
-				} else {
-					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, o.expSubj))
-				}
-			}
-		}
-
 		e, err := s.wrapEvent(event)
 		if err != nil {
 			return 0, err
 		}
 
+		subject := s.subjectFunc(e)
 		msg, err := s.packEvent(subject, e)
 		if err != nil {
 			return 0, err
+		}
+
+		if i == 0 {
+			if o.expSeq != nil {
+				if o.expSubj == "" {
+					idx := strings.LastIndex(subject, ".")
+					expSubj := fmt.Sprintf("%s.*", subject[:idx])
+					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+				} else {
+					expSubj := fmt.Sprintf("%s.%s", s.subjectPrefix, o.expSubj)
+					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+				}
+			}
 		}
 
 		// TODO: add retry logic in case of intermittent errors?
@@ -424,33 +497,79 @@ func (s *EventStore) Append(ctx context.Context, subject string, events []*Event
 	return ack.Sequence, nil
 }
 
+// parseSubjectPrefix parses and validates that the subject prefix
+// ends with "*.*.*" or ">".
+func parseSubjectPrefix(s string) (string, error) {
+	toks := strings.Split(s, ".")
+	if len(toks) < 2 {
+		return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
+	}
+
+	// Can be the only wildcard.
+	if toks[len(toks)-1] == ">" {
+		if slices.Contains(toks[:len(toks)-1], "*") {
+			return "", fmt.Errorf("wildcards not allowed before '>'")
+		}
+
+		return s[:len(s)-2], nil
+	}
+
+	if len(toks) < 4 {
+		return "", fmt.Errorf("subject must have a prefix before '*.*.*'")
+	}
+
+	if toks[len(toks)-3] == "*" && toks[len(toks)-2] == "*" && toks[len(toks)-1] == "*" {
+		if slices.Contains(toks[:len(toks)-3], "*") {
+			return "", fmt.Errorf("wildcards not allowed before '*.*.*'")
+		}
+
+		// Three wildcard tokens and dots.
+		return s[:len(s)-6], nil
+	}
+
+	return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
+}
+
 // Create creates the event store given the configuration. The stream
 // name is the name of the store and the subjects default to "{name}.>".
-func (s *EventStore) Create(config *jetstream.StreamConfig) error {
+func (s *EventStore) Create(ctx context.Context, config *jetstream.StreamConfig) error {
 	if config == nil {
 		config = &jetstream.StreamConfig{}
 	}
-	config.Name = s.name
 
-	if len(config.Subjects) == 0 {
+	config.Name = s.name
+	switch len(config.Subjects) {
+	case 1:
+	case 0:
 		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
+	default:
+		return fmt.Errorf("only one subject is supported for event stores")
 	}
 
-	_, err := s.rt.js.CreateStream(s.rt.ctx, *config)
+	prefix, err := parseSubjectPrefix(config.Subjects[0])
+	if err != nil {
+		return err
+	}
+	s.subjectPrefix = prefix
+	s.subjectFunc = func(event *Event) string {
+		return fmt.Sprintf("%s.%s.%s", prefix, event.Entity, event.Type)
+	}
+
+	_, err = s.rt.js.CreateStream(ctx, *config)
 	return err
 }
 
 // Update updates the event store configuration.
-func (s *EventStore) Update(config *jetstream.StreamConfig) error {
+func (s *EventStore) Update(ctx context.Context, config *jetstream.StreamConfig) error {
 	if config == nil {
 		config = &jetstream.StreamConfig{}
 	}
 	config.Name = s.name
-	_, err := s.rt.js.UpdateStream(s.rt.ctx, *config)
+	_, err := s.rt.js.UpdateStream(ctx, *config)
 	return err
 }
 
 // Delete deletes the event store.
-func (s *EventStore) Delete() error {
-	return s.rt.js.DeleteStream(s.rt.ctx, s.name)
+func (s *EventStore) Delete(ctx context.Context) error {
+	return s.rt.js.DeleteStream(ctx, s.name)
 }
