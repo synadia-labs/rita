@@ -52,18 +52,17 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	r, err := New(t.Context(), nc)
 	is.NoErr(err)
 
-	es, err := r.EventStore("orders")
+	ctx := context.Background()
+	es, err := r.EventStore(ctx, "store")
 	is.NoErr(err)
 
-	err = es.Create(&jetstream.StreamConfig{
+	err = es.Create(ctx, &jetstream.StreamConfig{
 		Storage: jetstream.MemoryStorage,
 	})
 	is.NoErr(err)
 
-	ctx := context.Background()
-
 	seq, err := es.Append(ctx, []*Event{{
-		Entity: "1",
+		Entity: "order.1",
 		Type:   "foo",
 		Data:   []byte("hello"),
 	}})
@@ -72,7 +71,7 @@ func TestEventStoreNoRegistry(t *testing.T) {
 
 	var events eventSlice
 
-	_, err = es.Evolve(ctx, "orders.>", &events)
+	_, err = es.Evolve(ctx, "order", &events)
 	is.NoErr(err)
 	is.Equal(events[0].Type, "foo")
 	is.Equal(events[0].Data, []byte("hello"))
@@ -91,14 +90,14 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				ctx := context.Background()
 				devent := OrderPlaced{ID: "123"}
 				seq, err := es.Append(ctx, []*Event{{
-					Entity: "123",
+					Entity: "order.123",
 					Data:   &devent,
 				}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, "orders.>", &events)
+				lseq, err := es.Evolve(ctx, "order", &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -118,7 +117,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				ctx := context.Background()
 
 				event1 := &Event{
-					Entity: "123",
+					Entity: "order.123",
 					Data:   &OrderPlaced{ID: "123"},
 					Meta: map[string]string{
 						"geo": "eu",
@@ -130,7 +129,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(1))
 
 				event2 := &Event{
-					Entity: "123",
+					Entity: "order.123",
 					Data:   &OrderShipped{ID: "123"},
 				}
 
@@ -139,7 +138,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(2))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, "orders.>", &events)
+				lseq, err := es.Evolve(ctx, "order", &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -151,16 +150,16 @@ func TestEventStoreWithRegistry(t *testing.T) {
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
-				seq, err := es.Append(ctx, []*Event{{Entity: "123", Data: &OrderPlaced{ID: "123"}}})
+				seq, err := es.Append(ctx, []*Event{{Entity: "order.123", Data: &OrderPlaced{ID: "123"}}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
-				seq, err = es.Append(ctx, []*Event{{Entity: "123", Data: &OrderShipped{ID: "123"}}})
+				seq, err = es.Append(ctx, []*Event{{Entity: "order.123", Data: &OrderShipped{ID: "123"}}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, "orders.>", &events, AfterSequence(1))
+				lseq, err := es.Evolve(ctx, "order", &events, AfterSequence(1))
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -175,7 +174,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 				e := &Event{
 					ID:     id.NUID.New(),
-					Entity: "123",
+					Entity: "order.123",
 					Data:   &OrderPlaced{ID: "123"},
 				}
 
@@ -200,10 +199,10 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				ctx := context.Background()
 
 				events := []*Event{
-					{Entity: "1", Data: &OrderPlaced{ID: "1"}},
-					{Entity: "2", Data: &OrderPlaced{ID: "2"}},
-					{Entity: "3", Data: &OrderPlaced{ID: "3"}},
-					{Entity: "2", Data: &OrderShipped{ID: "2"}},
+					{Entity: "order.1", Data: &OrderPlaced{ID: "1"}},
+					{Entity: "order.2", Data: &OrderPlaced{ID: "2"}},
+					{Entity: "order.3", Data: &OrderPlaced{ID: "3"}},
+					{Entity: "order.2", Data: &OrderShipped{ID: "2"}},
 				}
 
 				seq, err := es.Append(ctx, events)
@@ -211,7 +210,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(4))
 
 				var stats OrderStats
-				seq2, err := es.Evolve(ctx, "orders.>", &stats)
+				seq2, err := es.Evolve(ctx, "order", &stats)
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -219,12 +218,12 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 1)
 
 				// New event to test out AfterSequence.
-				e5 := &Event{Entity: "1", Data: &OrderShipped{ID: "1"}}
+				e5 := &Event{Entity: "order.1", Data: &OrderShipped{ID: "1"}}
 				seq, err = es.Append(ctx, []*Event{e5})
 				is.NoErr(err)
 				is.Equal(seq, uint64(5))
 
-				seq2, err = es.Evolve(ctx, "orders.>", &stats, AfterSequence(seq2))
+				seq2, err = es.Evolve(ctx, "order", &stats, AfterSequence(seq2))
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -238,17 +237,17 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				ctx := context.Background()
 
 				events := []*Event{
-					{Entity: "1", Data: &OrderPlaced{ID: "1"}},
-					{Entity: "2", Data: &OrderPlaced{ID: "2"}},
-					{Entity: "3", Data: &OrderPlaced{ID: "3"}},
-					{Entity: "2", Data: &OrderShipped{ID: "2"}},
+					{Entity: "order.1", Data: &OrderPlaced{ID: "1"}},
+					{Entity: "order.2", Data: &OrderPlaced{ID: "2"}},
+					{Entity: "order.3", Data: &OrderPlaced{ID: "3"}},
+					{Entity: "order.2", Data: &OrderShipped{ID: "2"}},
 				}
 
 				_, err := es.Append(ctx, events)
 				is.NoErr(err)
 
 				var stats OrderStats
-				seq, err := es.Evolve(ctx, "orders.>", &stats, UpToSequence(2))
+				seq, err := es.Evolve(ctx, "order", &stats, UpToSequence(2))
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
@@ -256,7 +255,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 0)
 
 				var stats2 OrderStats
-				seq, err = es.Evolve(ctx, "orders.>", &stats2, AfterSequence(1), UpToSequence(3))
+				seq, err = es.Evolve(ctx, "order", &stats2, AfterSequence(1), UpToSequence(3))
 				is.NoErr(err)
 				is.Equal(seq, uint64(3))
 
@@ -286,12 +285,13 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
-			es, err := r.EventStore("orders")
+			ctx := context.Background()
+			es, err := r.EventStore(ctx, "store")
 			is.NoErr(err)
 
 			// Recreate the store for each test.
-			_ = es.Delete()
-			err = es.Create(&jetstream.StreamConfig{
+			_ = es.Delete(ctx)
+			err = es.Create(ctx, &jetstream.StreamConfig{
 				Storage: jetstream.MemoryStorage,
 			})
 			is.NoErr(err)

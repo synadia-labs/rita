@@ -2,6 +2,7 @@ package rita
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -58,11 +59,10 @@ func Logger(logger *slog.Logger) RitaOption {
 }
 
 type Rita struct {
-	ctx         context.Context
-	logger      *slog.Logger
-	nc          *nats.Conn
-	js          jetstream.JetStream
-	subjectFunc func(e *Event) string
+	ctx    context.Context
+	logger *slog.Logger
+	nc     *nats.Conn
+	js     jetstream.JetStream
 
 	id    id.ID
 	clock clock.Clock
@@ -138,22 +138,26 @@ func (r *Rita) UnpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-func (r *Rita) EventStore(name string, opts ...EventStoreOption) (*EventStore, error) {
+func (r *Rita) EventStore(ctx context.Context, name string) (*EventStore, error) {
 	e := &EventStore{
 		name: name,
 		rt:   r,
 	}
 
-	for _, o := range opts {
-		if err := o.addOption(e); err != nil {
+	// If the stream exists, extract the subject prefix, otherwise this
+	// will be done on create.
+	str, err := r.js.Stream(ctx, name)
+	if err == nil {
+		prefix, err := parseSubjectPrefix(str.CachedInfo().Config.Subjects[0])
+		if err != nil {
 			return nil, err
 		}
-	}
-
-	if r.subjectFunc == nil {
-		e.subjectFunc = func(e *Event) string {
-			return fmt.Sprintf("%s.%s.%s", name, e.Entity, e.Type)
+		e.subjectPrefix = prefix
+		e.subjectFunc = func(event *Event) string {
+			return fmt.Sprintf("%s.%s.%s", prefix, event.Entity, event.Type)
 		}
+	} else if !errors.Is(err, jetstream.ErrStreamNotFound) {
+		return nil, err
 	}
 
 	return e, nil

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ var (
 	ErrSequenceConflict    = errors.New("rita: sequence conflict")
 	ErrEventDataRequired   = errors.New("rita: event data required")
 	ErrEventEntityRequired = errors.New("rita: event entity required")
+	ErrEventEntityInvalid  = fmt.Errorf("rite: event entity invalid")
 	ErrEventTypeRequired   = errors.New("rita: event type required")
 )
 
@@ -47,6 +50,7 @@ type Event struct {
 
 	// Identifier for specific entities.  Can be used to determine if
 	// an is related to a specific entity/node/endpoint/agent/etc.
+	// The format must be two tokens, e.g. "node.1234".
 	Entity string
 
 	// Time is the time of when the event occurred which may be different
@@ -164,33 +168,15 @@ type natsStoredMsg struct {
 	Sequence uint64 `json:"seq"`
 }
 
-type eventStoreOption func(o *EventStore) error
-
-func (f eventStoreOption) addOption(o *EventStore) error {
-	return f(o)
-}
-
-// RitaOption models a option when creating a type registry.
-type EventStoreOption interface {
-	addOption(o *EventStore) error
-}
-
-// EventSubject sets a function that derives the suffix of the subject
-// for an event. By default, it is `<entity>.<type>` and appended to the
-// store name.
-func EventSubject(fn func(e *Event) string) EventStoreOption {
-	return eventStoreOption(func(o *EventStore) error {
-		o.subjectFunc = fn
-		return nil
-	})
-}
-
 // EventStore provides event store semantics over a NATS stream.
 type EventStore struct {
-	name        string
-	rt          *Rita
-	subjectFunc func(event *Event) string
+	name          string
+	rt            *Rita
+	subjectPrefix string
+	subjectFunc   func(event *Event) string
 }
+
+var entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
 
 // wrapEvent wraps a user-defined event into the Event envelope. It performs
 // validation to ensure all the properties are either defined or defaults are set.
@@ -201,6 +187,9 @@ func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 
 	if event.Entity == "" {
 		return nil, ErrEventEntityRequired
+	}
+	if !entityRegex.MatchString(event.Entity) {
+		return nil, ErrEventEntityInvalid
 	}
 
 	if s.rt.types == nil {
@@ -318,10 +307,44 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) er
 	return err
 }
 
+func parseEvolvePattern(subject string) (string, error) {
+	toks := strings.Split(subject, ".")
+	if len(toks) < 1 {
+		return "", fmt.Errorf("subject must have at least an entity type")
+	}
+	if len(toks) > 3 {
+		return "", fmt.Errorf("subject can have at most three tokens")
+	}
+
+	ntoks := make([]string, 3)
+	for i := range ntoks {
+		if i < len(toks) {
+			ntoks[i] = toks[i]
+		} else {
+			ntoks[i] = "*"
+		}
+	}
+
+	return fmt.Sprintf("%s.%s.%s", ntoks[0], ntoks[1], ntoks[2]), nil
+}
+
 // Evolve loads events and evolves a model of state. The sequence of the
 // last event that evolved the state is returned, including when an error
-// occurs.
-func (s *EventStore) Evolve(ctx context.Context, subject string, model Evolver, opts ...EvolveOption) (uint64, error) {
+// occurs. Note, the pattern can be several forms depending on the need.
+// The full template is `<entity-type>.<entity-id>.<event-type>`. If only
+// the entity type is provided, all events for all entities of that type
+// will be loaded. If the entity type and entity ID are provided, all events
+// for that specific entity will be loaded. If the full subject is provided,
+// only events of that specific type for that specific entity will be loaded.
+// Wildcards can be used as well.
+func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, opts ...EvolveOption) (uint64, error) {
+	pattern, err := parseEvolvePattern(pattern)
+	if err != nil {
+		return 0, err
+	}
+
+	subject := fmt.Sprintf("%s.%s", s.subjectPrefix, pattern)
+
 	// Configure opts.
 	var o evolveOpts
 	for _, opt := range opts {
@@ -467,30 +490,78 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 	return ack.Sequence, nil
 }
 
+// parseSubjectPrefix parses and validates that the subject prefix
+// ends with "*.*.*" or ">".
+func parseSubjectPrefix(s string) (string, error) {
+	toks := strings.Split(s, ".")
+	if len(toks) < 2 {
+		return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
+	}
+
+	// Can be the only wildcard.
+	if toks[len(toks)-1] == ">" {
+		if slices.Contains(toks[:len(toks)-1], "*") {
+			return "", fmt.Errorf("wildcards not allowed before '>'")
+		}
+
+		return s[:len(s)-2], nil
+	}
+
+	if len(toks) < 4 {
+		return "", fmt.Errorf("subject must have a prefix before '*.*.*'")
+	}
+
+	if toks[len(toks)-3] == "*" && toks[len(toks)-2] == "*" && toks[len(toks)-1] == "*" {
+		if slices.Contains(toks[:len(toks)-3], "*") {
+			return "", fmt.Errorf("wildcards not allowed before '*.*.*'")
+		}
+
+		return s[:len(s)-4], nil
+	}
+
+	return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
+}
+
 // Create creates the event store given the configuration. The stream
 // name is the name of the store and the subjects default to "{name}.>".
-func (s *EventStore) Create(config *jetstream.StreamConfig) error {
+func (s *EventStore) Create(ctx context.Context, config *jetstream.StreamConfig) error {
 	if config == nil {
 		config = &jetstream.StreamConfig{}
 	}
-	config.Name = s.name
-	config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
 
-	_, err := s.rt.js.CreateStream(s.rt.ctx, *config)
+	config.Name = s.name
+	switch len(config.Subjects) {
+	case 1:
+	case 0:
+		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
+	default:
+		return fmt.Errorf("only one subject is supported for event stores")
+	}
+
+	prefix, err := parseSubjectPrefix(config.Subjects[0])
+	if err != nil {
+		return err
+	}
+	s.subjectPrefix = prefix
+	s.subjectFunc = func(event *Event) string {
+		return fmt.Sprintf("%s.%s.%s", prefix, event.Entity, event.Type)
+	}
+
+	_, err = s.rt.js.CreateStream(ctx, *config)
 	return err
 }
 
 // Update updates the event store configuration.
-func (s *EventStore) Update(config *jetstream.StreamConfig) error {
+func (s *EventStore) Update(ctx context.Context, config *jetstream.StreamConfig) error {
 	if config == nil {
 		config = &jetstream.StreamConfig{}
 	}
 	config.Name = s.name
-	_, err := s.rt.js.UpdateStream(s.rt.ctx, *config)
+	_, err := s.rt.js.UpdateStream(ctx, *config)
 	return err
 }
 
 // Delete deletes the event store.
-func (s *EventStore) Delete() error {
-	return s.rt.js.DeleteStream(s.rt.ctx, s.name)
+func (s *EventStore) Delete(ctx context.Context) error {
+	return s.rt.js.DeleteStream(ctx, s.name)
 }
