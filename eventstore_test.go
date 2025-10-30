@@ -71,7 +71,7 @@ func TestEventStoreNoRegistry(t *testing.T) {
 
 	var events eventSlice
 
-	_, err = es.Evolve(ctx, "order", &events)
+	_, err = es.Evolve(ctx, &events)
 	is.NoErr(err)
 	is.Equal(events[0].Type, "foo")
 	is.Equal(events[0].Data, []byte("hello"))
@@ -97,7 +97,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(1))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, "order", &events)
+				lseq, err := es.Evolve(ctx, &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -138,7 +138,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(2))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, "order", &events)
+				lseq, err := es.Evolve(ctx, &events)
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -159,7 +159,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(2))
 
 				var events eventSlice
-				lseq, err := es.Evolve(ctx, "order", &events, AfterSequence(1))
+				lseq, err := es.Evolve(ctx, &events, AfterSequence(1))
 				is.NoErr(err)
 
 				is.Equal(seq, lseq)
@@ -210,7 +210,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(4))
 
 				var stats OrderStats
-				seq2, err := es.Evolve(ctx, "order", &stats)
+				seq2, err := es.Evolve(ctx, &stats)
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -223,7 +223,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.NoErr(err)
 				is.Equal(seq, uint64(5))
 
-				seq2, err = es.Evolve(ctx, "order", &stats, AfterSequence(seq2))
+				seq2, err = es.Evolve(ctx, &stats, AfterSequence(seq2))
 				is.NoErr(err)
 				is.Equal(seq, seq2)
 
@@ -247,7 +247,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.NoErr(err)
 
 				var stats OrderStats
-				seq, err := es.Evolve(ctx, "order", &stats, UpToSequence(2))
+				seq, err := es.Evolve(ctx, &stats, UpToSequence(2))
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
@@ -255,7 +255,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 0)
 
 				var stats2 OrderStats
-				seq, err = es.Evolve(ctx, "order", &stats2, AfterSequence(1), UpToSequence(3))
+				seq, err = es.Evolve(ctx, &stats2, AfterSequence(1), UpToSequence(3))
 				is.NoErr(err)
 				is.Equal(seq, uint64(3))
 

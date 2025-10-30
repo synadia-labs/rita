@@ -117,6 +117,7 @@ func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 }
 
 type evolveOpts struct {
+	pattern  string
 	afterSeq *uint64
 	upToSeq  *uint64
 }
@@ -148,6 +149,16 @@ func AfterSequence(seq uint64) EvolveOption {
 func UpToSequence(seq uint64) EvolveOption {
 	return evolveOptFn(func(o *evolveOpts) error {
 		o.upToSeq = &seq
+		return nil
+	})
+}
+
+// Pattern specifies the subject pattern to use when evolving state.
+// The pattern can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
+// or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well.
+func Pattern(pattern string) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.pattern = pattern
 		return nil
 	})
 }
@@ -312,6 +323,10 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) er
 }
 
 func parseEvolvePattern(subject string) (string, error) {
+	if subject == "" {
+		return "*.*.*", nil
+	}
+
 	toks := strings.Split(subject, ".")
 	if len(toks) < 1 {
 		return "", fmt.Errorf("subject must have at least an entity type")
@@ -341,14 +356,7 @@ func parseEvolvePattern(subject string) (string, error) {
 // for that specific entity will be loaded. If the full subject is provided,
 // only events of that specific type for that specific entity will be loaded.
 // Wildcards can be used as well.
-func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, opts ...EvolveOption) (uint64, error) {
-	pattern, err := parseEvolvePattern(pattern)
-	if err != nil {
-		return 0, err
-	}
-
-	subject := fmt.Sprintf("%s.%s", s.subjectPrefix, pattern)
-
+func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
 	// Configure opts.
 	var o evolveOpts
 	for _, opt := range opts {
@@ -356,6 +364,13 @@ func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, 
 			return 0, err
 		}
 	}
+
+	pattern, err := parseEvolvePattern(o.pattern)
+	if err != nil {
+		return 0, err
+	}
+
+	subject := fmt.Sprintf("%s.%s", s.subjectPrefix, pattern)
 
 	lastMsg, err := s.lastMsgForSubject(ctx, subject)
 	if err != nil {
