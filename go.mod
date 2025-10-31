@@ -23,6 +23,8 @@ require (
 	github.com/nats-io/jwt/v2 v2.8.0 // indirect
 	github.com/nats-io/nkeys v0.4.11 // indirect
 	github.com/stretchr/testify v1.7.1 // indirect
+	github.com/synadia-io/orbit.go/jetstreamext v0.2.0 // indirect
+	github.com/synadia-io/orbit.go/natsext v0.1.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/sys v0.37.0 // indirect

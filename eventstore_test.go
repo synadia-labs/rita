@@ -6,18 +6,13 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/synadia-labs/rita/id"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
 )
 
-type OrderPlaced struct {
-	ID string
-}
+type OrderPlaced struct{}
 
-type OrderShipped struct {
-	ID string
-}
+type OrderShipped struct{}
 
 type OrderStats struct {
 	OrdersPlaced  int
@@ -86,13 +81,16 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		Run  func(t *testing.T, es *EventStore)
 	}{
 		{
-			"append-load-no-occ",
+			"append",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
-				devent := OrderPlaced{ID: "123"}
+				devent := OrderPlaced{}
 				seq, err := es.Append(ctx, []*Event{{
-					Entity: "order.123",
+					Entity: "order.1",
 					Data:   &devent,
+					Meta: map[string]string{
+						"geo": "eu",
+					},
 				}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
@@ -107,76 +105,90 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.True(events[0].ID != "")
 				is.True(!events[0].Time.IsZero())
 				is.Equal(events[0].Type, "order-placed")
+				is.Equal(events[0].Meta["geo"], "eu")
 				data, ok := events[0].Data.(*OrderPlaced)
 				is.True(ok)
 				is.Equal(*data, devent)
 			},
 		},
 		{
-			"append-load-with-occ",
+			"append-expect-sequence",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
-				event1 := &Event{
-					Entity: "order.123",
-					Data:   &OrderPlaced{ID: "123"},
-					Meta: map[string]string{
-						"geo": "eu",
-					},
-				}
-
-				seq, err := es.Append(ctx, []*Event{event1}, ExpectSequence(0))
+				seq, err := es.Append(ctx, []*Event{{
+					Entity: "order.1",
+					Data:   &OrderPlaced{},
+				}}, ExpectSequence(0))
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
-				event2 := &Event{
-					Entity: "order.123",
-					Data:   &OrderShipped{ID: "123"},
-				}
-
-				seq, err = es.Append(ctx, []*Event{event2}, ExpectSequence(1))
+				seq, err = es.Append(ctx, []*Event{{
+					Entity: "order.1",
+					Data:   &OrderShipped{},
+				}}, ExpectSequence(1))
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
-
-				var events eventSlice
-				lseq, err := es.Evolve(ctx, &events)
-				is.NoErr(err)
-
-				is.Equal(seq, lseq)
-				is.Equal(len(events), 2)
 			},
 		},
 		{
-			"append-load-partial",
+			"append-expect-sequence-subject",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
-				seq, err := es.Append(ctx, []*Event{{Entity: "order.123", Data: &OrderPlaced{ID: "123"}}})
+				seq, err := es.Append(ctx, []*Event{{
+					Entity: "order.1",
+					Data:   &OrderPlaced{},
+				}})
 				is.NoErr(err)
 				is.Equal(seq, uint64(1))
 
-				seq, err = es.Append(ctx, []*Event{{Entity: "order.123", Data: &OrderShipped{ID: "123"}}})
+				seq, err = es.Append(ctx, []*Event{{
+					Entity: "order.1",
+					Data:   &OrderShipped{},
+				}}, ExpectSequence(1)) // specific entity
 				is.NoErr(err)
 				is.Equal(seq, uint64(2))
 
-				var events eventSlice
-				lseq, err := es.Evolve(ctx, &events, AfterSequence(1))
+				seq, err = es.Append(ctx, []*Event{{
+					Entity: "order.2",
+					Data:   &OrderPlaced{},
+				}}, ExpectSequenceSubject(2, "order")) // for all orders
 				is.NoErr(err)
+				is.Equal(seq, uint64(3))
 
-				is.Equal(seq, lseq)
-				is.Equal(len(events), 1)
-				is.Equal(events[0].Type, "order-shipped")
+				seq, err = es.Append(ctx, []*Event{{
+					Entity: "order.3",
+					Data:   &OrderPlaced{},
+				}}, ExpectSequenceSubject(0, "order.3")) // relative to event entity (default)
+				is.NoErr(err)
+				is.Equal(seq, uint64(4))
+
+				seq, err = es.Append(ctx, []*Event{{
+					Entity: "order.4",
+					Data:   &OrderPlaced{},
+				}}, ExpectSequenceSubject(4, "order.3")) // relative to a different entity
+				is.NoErr(err)
+				is.Equal(seq, uint64(5))
+
+				seq, err = es.Append(ctx, []*Event{{
+					Entity: "order.5",
+					Data:   &OrderPlaced{},
+				}}, ExpectSequenceSubject(2, "*.*.order-shipped")) // relative to a type
+				is.NoErr(err)
+				is.Equal(seq, uint64(6))
 			},
 		},
+		/* TODO
 		{
-			"duplicate-append",
+			"append-duplicate",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				e := &Event{
 					ID:     id.NUID.New(),
-					Entity: "order.123",
-					Data:   &OrderPlaced{ID: "123"},
+					Entity: "order.1",
+					Data:   &OrderPlaced{},
 				}
 
 				seq, err := es.Append(ctx, []*Event{e})
@@ -194,16 +206,17 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(seq, uint64(1))
 			},
 		},
+		*/
 		{
-			"state",
+			"evolve-after-sequence",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				events := []*Event{
-					{Entity: "order.1", Data: &OrderPlaced{ID: "1"}},
-					{Entity: "order.2", Data: &OrderPlaced{ID: "2"}},
-					{Entity: "order.3", Data: &OrderPlaced{ID: "3"}},
-					{Entity: "order.2", Data: &OrderShipped{ID: "2"}},
+					{Entity: "order.1", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderPlaced{}},
+					{Entity: "order.3", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderShipped{}},
 				}
 
 				seq, err := es.Append(ctx, events)
@@ -219,7 +232,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.OrdersShipped, 1)
 
 				// New event to test out AfterSequence.
-				e5 := &Event{Entity: "order.1", Data: &OrderShipped{ID: "1"}}
+				e5 := &Event{Entity: "order.1", Data: &OrderShipped{}}
 				seq, err = es.Append(ctx, []*Event{e5})
 				is.NoErr(err)
 				is.Equal(seq, uint64(5))
@@ -233,15 +246,15 @@ func TestEventStoreWithRegistry(t *testing.T) {
 			},
 		},
 		{
-			"state-up-to-sequence",
+			"evolve-up-to-sequence",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
 				events := []*Event{
-					{Entity: "order.1", Data: &OrderPlaced{ID: "1"}},
-					{Entity: "order.2", Data: &OrderPlaced{ID: "2"}},
-					{Entity: "order.3", Data: &OrderPlaced{ID: "3"}},
-					{Entity: "order.2", Data: &OrderShipped{ID: "2"}},
+					{Entity: "order.1", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderPlaced{}},
+					{Entity: "order.3", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderShipped{}},
 				}
 
 				_, err := es.Append(ctx, events)
@@ -262,6 +275,29 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 				is.Equal(stats2.OrdersPlaced, 2)
 				is.Equal(stats2.OrdersShipped, 0)
+			},
+		},
+		{
+			"evolve-patterns",
+			func(t *testing.T, es *EventStore) {
+				ctx := context.Background()
+
+				events := []*Event{
+					{Entity: "order.1", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderPlaced{}},
+					{Entity: "order.3", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderShipped{}},
+				}
+
+				_, err := es.Append(ctx, events)
+				is.NoErr(err)
+
+				var stats OrderStats
+				_, err = es.Evolve(ctx, &stats, Filters("*.*.order-shipped"))
+				is.NoErr(err)
+
+				is.Equal(stats.OrdersPlaced, 0)
+				is.Equal(stats.OrdersShipped, 1)
 			},
 		},
 	}

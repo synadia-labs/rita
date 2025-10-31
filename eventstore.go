@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/synadia-io/orbit.go/jetstreamext"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -118,7 +119,7 @@ func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 }
 
 type evolveOpts struct {
-	patterns []string
+	fillters []string
 	afterSeq *uint64
 	upToSeq  *uint64
 }
@@ -154,12 +155,12 @@ func UpToSequence(seq uint64) EvolveOption {
 	})
 }
 
-// Pattern specifies the subject pattern to use when evolving state.
-// The pattern can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
+// Filters specifies the subject filter to use when evolving state.
+// The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
 // or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well.
-func Patterns(patterns ...string) EvolveOption {
+func Filters(filters ...string) EvolveOption {
 	return evolveOptFn(func(o *evolveOpts) error {
-		o.patterns = patterns
+		o.fillters = filters
 		return nil
 	})
 }
@@ -317,13 +318,13 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	}
 
 	// If still no patterns, default to all.
-	if len(o.patterns) == 0 {
-		o.patterns = []string{"*.*.*"}
+	if len(o.fillters) == 0 {
+		o.fillters = []string{"*.*.*"}
 	}
 
 	// Build subjects from patterns.
-	subjects := make([]string, len(o.patterns))
-	for i, p := range o.patterns {
+	subjects := make([]string, len(o.fillters))
+	for i, p := range o.fillters {
 		pp, err := parsePattern(p)
 		if err != nil {
 			return 0, err
@@ -405,6 +406,11 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	return lastSeq, nil
 }
 
+func is212(nc *nats.Conn) bool {
+	v := nc.ConnectedServerVersion()
+	return strings.HasPrefix(v, "2.12.")
+}
+
 // Append appends a one or more events to the subject's event sequence.
 // It returns the resulting sequence number of the last appended event.
 func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...AppendOption) (uint64, error) {
@@ -416,13 +422,10 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 		}
 	}
 
-	var ack *jetstream.PubAck
+	// Prepare messages.
+	var msgs []*nats.Msg
 
 	for i, event := range events {
-		popts := []jetstream.PublishOpt{
-			jetstream.WithExpectStream(s.name),
-		}
-
 		e, err := s.wrapEvent(event)
 		if err != nil {
 			return 0, err
@@ -433,22 +436,44 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 		if err != nil {
 			return 0, err
 		}
+		msg.Header.Set(nats.ExpectedStreamHdr, s.name)
 
 		if i == 0 {
 			if o.expSeq != nil {
 				if o.expSubj == "" {
 					idx := strings.LastIndex(subject, ".")
 					expSubj := fmt.Sprintf("%s.*", subject[:idx])
-					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", *o.expSeq))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
 				} else {
 					expSubj := fmt.Sprintf("%s.%s", s.subjectPrefix, o.expSubj)
-					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", *o.expSeq))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
 				}
 			}
 		}
 
-		// TODO: add retry logic in case of intermittent errors?
-		ack, err = s.rt.js.PublishMsg(s.rt.ctx, msg, popts...)
+		msgs = append(msgs, msg)
+	}
+
+	// Use atomic publish for NATS Server 2.12+
+	if is212(s.rt.nc) {
+		ack, err := jetstreamext.PublishMsgBatch(ctx, s.rt.js, msgs)
+		if err != nil {
+			if strings.Contains(err.Error(), "wrong last sequence") {
+				return 0, ErrSequenceConflict
+			}
+			return 0, err
+		}
+
+		return ack.Sequence, nil
+	}
+
+	// Fallback to individual publishes for older servers.
+	var ack *jetstream.PubAck
+	var err error
+	for _, msg := range msgs {
+		ack, err = s.rt.js.PublishMsg(s.rt.ctx, msg)
 		if err != nil {
 			if strings.Contains(err.Error(), "wrong last sequence") {
 				return 0, ErrSequenceConflict
@@ -507,6 +532,10 @@ func (s *EventStore) Create(ctx context.Context, config *jetstream.StreamConfig)
 		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
 	default:
 		return fmt.Errorf("only one subject is supported for event stores")
+	}
+
+	if is212(s.rt.nc) {
+		config.AllowAtomicPublish = true
 	}
 
 	prefix, err := parseSubjectPrefix(config.Subjects[0])
