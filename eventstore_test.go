@@ -278,7 +278,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 			},
 		},
 		{
-			"evolve-patterns",
+			"evolve-filters",
 			func(t *testing.T, es *EventStore) {
 				ctx := context.Background()
 
