@@ -2,7 +2,6 @@ package rita
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/synadia-io/orbit.go/jetstreamext"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -28,16 +28,18 @@ var (
 	ErrSequenceConflict    = errors.New("rita: sequence conflict")
 	ErrEventDataRequired   = errors.New("rita: event data required")
 	ErrEventEntityRequired = errors.New("rita: event entity required")
-	ErrEventEntityInvalid  = fmt.Errorf("rite: event entity invalid")
+	ErrEventEntityInvalid  = errors.New("rita: event entity invalid")
 	ErrEventTypeRequired   = errors.New("rita: event type required")
 )
 
-// Validator can be optionally implemented by user-defined types and will be
+// validator can be optionally implemented by user-defined types and will be
 // validated in different contexts, such as before appending an event to a stream.
 type validator interface {
 	Validate() error
 }
 
+// Evolver is an interface that application-defined models can implement
+// to evolve their state based on events.
 type Evolver interface {
 	Evolve(event *Event) error
 }
@@ -106,7 +108,7 @@ func ExpectSequence(seq uint64) AppendOption {
 // be the value provided. If not, a conflict is indicated.
 func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 	return appendOptFn(func(o *appendOpts) error {
-		pattern, err := parseEvolvePattern(subject)
+		pattern, err := parsePattern(subject)
 		if err != nil {
 			return err
 		}
@@ -117,6 +119,7 @@ func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 }
 
 type evolveOpts struct {
+	filters  []string
 	afterSeq *uint64
 	upToSeq  *uint64
 }
@@ -152,24 +155,14 @@ func UpToSequence(seq uint64) EvolveOption {
 	})
 }
 
-type natsApiError struct {
-	Code        int    `json:"code"`
-	ErrCode     uint16 `json:"err_code"`
-	Description string `json:"description"`
-}
-
-type natsGetMsgRequest struct {
-	LastBySubject string `json:"last_by_subj"`
-}
-
-type natsGetMsgResponse struct {
-	Type    string         `json:"type"`
-	Error   *natsApiError  `json:"error"`
-	Message *natsStoredMsg `json:"message"`
-}
-
-type natsStoredMsg struct {
-	Sequence uint64 `json:"seq"`
+// Filters specifies the subject filter to use when evolving state.
+// The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
+// or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well.
+func Filters(filters ...string) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.filters = filters
+		return nil
+	})
 }
 
 // EventStore provides event store semantics over a NATS stream.
@@ -271,36 +264,7 @@ func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) 
 	return msg, nil
 }
 
-// lastSeqForSubject queries the JS API to identify the current latest sequence for a subject.
-// This is used as an best-guess indicator of the current end of the even history.
-func (s *EventStore) lastMsgForSubject(ctx context.Context, subject string) (*natsStoredMsg, error) {
-	rsubject := fmt.Sprintf("$JS.API.STREAM.MSG.GET.%s", s.name)
-
-	data, _ := json.Marshal(&natsGetMsgRequest{
-		LastBySubject: subject,
-	})
-
-	msg, err := s.rt.nc.RequestWithContext(ctx, rsubject, data)
-	if err != nil {
-		return nil, err
-	}
-
-	var rep natsGetMsgResponse
-	err = json.Unmarshal(msg.Data, &rep)
-	if err != nil {
-		return nil, err
-	}
-
-	if rep.Error != nil {
-		if rep.Error.Code == 404 {
-			return &natsStoredMsg{}, nil
-		}
-		return nil, fmt.Errorf("%s (%d)", rep.Error.Description, rep.Error.Code)
-	}
-
-	return rep.Message, nil
-}
-
+// Decide is a convenience methods that combines the Decide and Append operations.
 func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) error {
 	events, err := model.Decide(cmd)
 	if err != nil {
@@ -311,16 +275,19 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) er
 	return err
 }
 
-func parseEvolvePattern(subject string) (string, error) {
-	toks := strings.Split(subject, ".")
-	if len(toks) < 1 {
-		return "", fmt.Errorf("subject must have at least an entity type")
+// parsePattern parses a subject pattern into the full form
+func parsePattern(subject string) (string, error) {
+	if subject == "" {
+		return "*.*.*", nil
 	}
+
+	toks := strings.Split(subject, ".")
 	if len(toks) > 3 {
 		return "", fmt.Errorf("subject can have at most three tokens")
 	}
 
 	ntoks := make([]string, 3)
+	// Individual tokens are not validated since this will downstream.
 	for i := range ntoks {
 		if i < len(toks) {
 			ntoks[i] = toks[i]
@@ -341,14 +308,7 @@ func parseEvolvePattern(subject string) (string, error) {
 // for that specific entity will be loaded. If the full subject is provided,
 // only events of that specific type for that specific entity will be loaded.
 // Wildcards can be used as well.
-func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, opts ...EvolveOption) (uint64, error) {
-	pattern, err := parseEvolvePattern(pattern)
-	if err != nil {
-		return 0, err
-	}
-
-	subject := fmt.Sprintf("%s.%s", s.subjectPrefix, pattern)
-
+func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
 	// Configure opts.
 	var o evolveOpts
 	for _, opt := range opts {
@@ -357,55 +317,59 @@ func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, 
 		}
 	}
 
-	lastMsg, err := s.lastMsgForSubject(ctx, subject)
-	if err != nil {
-		return 0, err
+	// If still no patterns, default to all.
+	if len(o.filters) == 0 {
+		o.filters = []string{"*.*.*"}
 	}
 
-	if lastMsg.Sequence == 0 {
-		return 0, nil
+	// Build subjects from patterns.
+	subjects := make([]string, len(o.filters))
+	for i, p := range o.filters {
+		pp, err := parsePattern(p)
+		if err != nil {
+			return 0, err
+		}
+		subjects[i] = fmt.Sprintf("%s.%s", s.subjectPrefix, pp)
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
 	sopts := jetstream.OrderedConsumerConfig{
-		FilterSubjects: []string{subject},
+		FilterSubjects: subjects,
 	}
 
-	// Don't bother creating the consumer if the last seq is smaller than start.
+	// Set starting point.
 	if o.afterSeq != nil {
-		if lastMsg.Sequence <= *o.afterSeq {
-			return lastMsg.Sequence, nil
-		}
 		if *o.afterSeq == 0 {
 			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 		} else {
-			sopts.OptStartSeq = *o.afterSeq
+			sopts.OptStartSeq = *o.afterSeq + 1
 			sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
 		}
 	} else {
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	consumer, err := s.rt.js.OrderedConsumer(s.rt.ctx, s.name, sopts)
+	con, err := s.rt.js.OrderedConsumer(s.rt.ctx, s.name, sopts)
 	if err != nil {
 		return 0, err
 	}
 
-	msgCtx, err := consumer.Messages()
+	// The number of messages to consume until we are caught up
+	// to the current known state.
+	pending := con.CachedInfo().NumPending
+
+	if pending == 0 {
+		return 0, nil
+	}
+
+	msgCtx, err := con.Messages()
 	if err != nil {
 		return 0, err
 	}
 	defer msgCtx.Stop()
 
-	// Skip first.
-	if o.afterSeq != nil && *o.afterSeq > 0 {
-		_, err := msgCtx.Next()
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	var lastSeq uint64
+	var count uint64
 	for {
 		msg, err := msgCtx.Next()
 		if err != nil {
@@ -433,13 +397,18 @@ func (s *EventStore) Evolve(ctx context.Context, pattern string, model Evolver, 
 			break
 		}
 
-		// Check if we've reached the last message in the stream.
-		if lastSeq == lastMsg.Sequence {
+		count++
+		if count == pending {
 			break
 		}
 	}
 
 	return lastSeq, nil
+}
+
+func is212(nc *nats.Conn) bool {
+	v := nc.ConnectedServerVersion()
+	return strings.HasPrefix(v, "2.12.")
 }
 
 // Append appends a one or more events to the subject's event sequence.
@@ -453,13 +422,10 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 		}
 	}
 
-	var ack *jetstream.PubAck
+	// Prepare messages.
+	var msgs []*nats.Msg
 
 	for i, event := range events {
-		popts := []jetstream.PublishOpt{
-			jetstream.WithExpectStream(s.name),
-		}
-
 		e, err := s.wrapEvent(event)
 		if err != nil {
 			return 0, err
@@ -470,22 +436,44 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 		if err != nil {
 			return 0, err
 		}
+		msg.Header.Set(nats.ExpectedStreamHdr, s.name)
 
 		if i == 0 {
 			if o.expSeq != nil {
 				if o.expSubj == "" {
 					idx := strings.LastIndex(subject, ".")
 					expSubj := fmt.Sprintf("%s.*", subject[:idx])
-					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", *o.expSeq))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
 				} else {
 					expSubj := fmt.Sprintf("%s.%s", s.subjectPrefix, o.expSubj)
-					popts = append(popts, jetstream.WithExpectLastSequenceForSubject(*o.expSeq, expSubj))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", *o.expSeq))
+					msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
 				}
 			}
 		}
 
-		// TODO: add retry logic in case of intermittent errors?
-		ack, err = s.rt.js.PublishMsg(s.rt.ctx, msg, popts...)
+		msgs = append(msgs, msg)
+	}
+
+	// Use atomic publish for NATS Server 2.12+
+	if is212(s.rt.nc) {
+		ack, err := jetstreamext.PublishMsgBatch(ctx, s.rt.js, msgs)
+		if err != nil {
+			if strings.Contains(err.Error(), "wrong last sequence") {
+				return 0, ErrSequenceConflict
+			}
+			return 0, err
+		}
+
+		return ack.Sequence, nil
+	}
+
+	// Fallback to individual publishes for older servers.
+	var ack *jetstream.PubAck
+	var err error
+	for _, msg := range msgs {
+		ack, err = s.rt.js.PublishMsg(s.rt.ctx, msg)
 		if err != nil {
 			if strings.Contains(err.Error(), "wrong last sequence") {
 				return 0, ErrSequenceConflict
@@ -544,6 +532,10 @@ func (s *EventStore) Create(ctx context.Context, config *jetstream.StreamConfig)
 		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
 	default:
 		return fmt.Errorf("only one subject is supported for event stores")
+	}
+
+	if is212(s.rt.nc) {
+		config.AllowAtomicPublish = true
 	}
 
 	prefix, err := parseSubjectPrefix(config.Subjects[0])
