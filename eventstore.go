@@ -119,7 +119,7 @@ func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
 }
 
 type evolveOpts struct {
-	fillters []string
+	filters  []string
 	afterSeq *uint64
 	upToSeq  *uint64
 }
@@ -160,7 +160,7 @@ func UpToSequence(seq uint64) EvolveOption {
 // or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well.
 func Filters(filters ...string) EvolveOption {
 	return evolveOptFn(func(o *evolveOpts) error {
-		o.fillters = filters
+		o.filters = filters
 		return nil
 	})
 }
@@ -318,13 +318,13 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	}
 
 	// If still no patterns, default to all.
-	if len(o.fillters) == 0 {
-		o.fillters = []string{"*.*.*"}
+	if len(o.filters) == 0 {
+		o.filters = []string{"*.*.*"}
 	}
 
 	// Build subjects from patterns.
-	subjects := make([]string, len(o.fillters))
-	for i, p := range o.fillters {
+	subjects := make([]string, len(o.filters))
+	for i, p := range o.filters {
 		pp, err := parsePattern(p)
 		if err != nil {
 			return 0, err
