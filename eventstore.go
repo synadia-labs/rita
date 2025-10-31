@@ -28,7 +28,7 @@ var (
 	ErrSequenceConflict    = errors.New("rita: sequence conflict")
 	ErrEventDataRequired   = errors.New("rita: event data required")
 	ErrEventEntityRequired = errors.New("rita: event entity required")
-	ErrEventEntityInvalid  = fmt.Errorf("rite: event entity invalid")
+	ErrEventEntityInvalid  = errors.New("rita: event entity invalid")
 	ErrEventTypeRequired   = errors.New("rita: event type required")
 )
 
