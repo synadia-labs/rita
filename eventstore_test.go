@@ -47,7 +47,8 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	srv := testutil.NewNatsServer(-1)
 	defer testutil.ShutdownNatsServer(srv)
 
-	nc, _ := nats.Connect(srv.ClientURL())
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
 
 	r, err := New(t.Context(), nc)
 	is.NoErr(err)
