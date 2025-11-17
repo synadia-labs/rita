@@ -11,6 +11,29 @@ import (
 	"github.com/synadia-labs/rita/types"
 )
 
+var (
+	registry = map[string]*types.Type{
+		"place-order": {
+			Init: func() any { return &PlaceOrder{} },
+		},
+		"order-placed": {
+			Init: func() any { return &OrderPlaced{} },
+		},
+		"ship-order": {
+			Init: func() any { return &ShipOrder{} },
+		},
+		"order-shipped": {
+			Init: func() any { return &OrderShipped{} },
+		},
+		"cancel-order": {
+			Init: func() any { return &CancelOrder{} },
+		},
+		"order-canceled": {
+			Init: func() any { return &OrderCanceled{} },
+		},
+	}
+)
+
 // Command and Event types for testing
 type PlaceOrder struct{}
 
@@ -343,14 +366,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 
 	nc, _ := nats.Connect(srv.ClientURL())
 
-	tr, err := types.NewRegistry(map[string]*types.Type{
-		"order-placed": {
-			Init: func() any { return &OrderPlaced{} },
-		},
-		"order-shipped": {
-			Init: func() any { return &OrderShipped{} },
-		},
-	})
+	tr, err := types.NewRegistry(registry)
 	is.NoErr(err)
 
 	m, err := New(nc, WithRegistry(tr))
@@ -363,7 +379,9 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				Name: "store",
 			})
 			is.NoErr(err)
-			defer m.DeleteEventStore(ctx, "store")
+			defer func() {
+				_ = m.DeleteEventStore(ctx, "store")
+			}()
 
 			test.Run(t, es)
 		})
@@ -379,14 +397,7 @@ func TestEventStoreDecide(t *testing.T) {
 	nc, err := nats.Connect(srv.ClientURL())
 	is.NoErr(err)
 
-	tr, err := types.NewRegistry(map[string]*types.Type{
-		"place-order": {
-			Init: func() any { return &PlaceOrder{} },
-		},
-		"order-placed": {
-			Init: func() any { return &OrderPlaced{} },
-		},
-	})
+	tr, err := types.NewRegistry(registry)
 	is.NoErr(err)
 
 	m, err := New(nc, WithRegistry(tr))
@@ -424,26 +435,7 @@ func TestModelWatcher(t *testing.T) {
 	nc, err := nats.Connect(srv.ClientURL())
 	is.NoErr(err)
 
-	tr, err := types.NewRegistry(map[string]*types.Type{
-		"place-order": {
-			Init: func() any { return &PlaceOrder{} },
-		},
-		"order-placed": {
-			Init: func() any { return &OrderPlaced{} },
-		},
-		"ship-order": {
-			Init: func() any { return &ShipOrder{} },
-		},
-		"order-shipped": {
-			Init: func() any { return &OrderShipped{} },
-		},
-		"cancel-order": {
-			Init: func() any { return &CancelOrder{} },
-		},
-		"order-canceled": {
-			Init: func() any { return &OrderCanceled{} },
-		},
-	})
+	tr, err := types.NewRegistry(registry)
 	is.NoErr(err)
 
 	mgr, err := New(nc, WithRegistry(tr))

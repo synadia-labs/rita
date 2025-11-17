@@ -66,47 +66,6 @@ func parsePattern(subject string) (string, error) {
 	return fmt.Sprintf("%s.%s.%s", ntoks[0], ntoks[1], ntoks[2]), nil
 }
 
-type appendOpts struct {
-	expSubj string
-	expSeq  *uint64
-}
-
-type appendOptFn func(o *appendOpts) error
-
-func (f appendOptFn) appendOpt(o *appendOpts) error {
-	return f(o)
-}
-
-// AppendOption is an option for the event store Append operation.
-type AppendOption interface {
-	appendOpt(o *appendOpts) error
-}
-
-/*
-// WithSequence indicates that the expected sequence of the implicit subject should
-// be the value provided. If not, a conflict is indicated.
-func WithSequence(seq uint64) AppendOption {
-	return appendOptFn(func(o *appendOpts) error {
-		o.expSeq = &seq
-		return nil
-	})
-}
-
-// WithSequenceSubject indicates that the expected sequence of the explicit subject should
-// be the value provided. If not, a conflict is indicated.
-func WithSequenceSubject(seq uint64, subject string) AppendOption {
-	return appendOptFn(func(o *appendOpts) error {
-		pattern, err := parsePattern(subject)
-		if err != nil {
-			return err
-		}
-		o.expSeq = &seq
-		o.expSubj = pattern
-		return nil
-	})
-}
-*/
-
 type evolveOpts struct {
 	filters  []string
 	afterSeq *uint64
@@ -322,12 +281,12 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 }
 
 // Decide is a convenience methods that combines the Decide and Append operations.
-func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command, opts ...AppendOption) (uint64, error) {
+func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) (uint64, error) {
 	events, err := model.Decide(cmd)
 	if err != nil {
 		return 0, err
 	}
-	return s.Append(ctx, events, opts...)
+	return s.Append(ctx, events)
 }
 
 // Evolve loads events and evolves a model of state. The sequence of the
@@ -341,10 +300,6 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command, op
 // Wildcards can be used as well.
 func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
 	var o evolveOpts
-	if s, ok := model.(Sequencer); ok {
-		seq := s.LastSequence()
-		o.afterSeq = &seq
-	}
 
 	// Configure opts.
 	for _, opt := range opts {
@@ -393,7 +348,9 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// The number of messages to consume until we are caught up
 	// to the current known state.
 	info := con.CachedInfo()
-	defer s.js.DeleteConsumer(ctx, s.name, info.Name)
+	defer func() {
+		_ = s.js.DeleteConsumer(ctx, s.name, info.Name)
+	}()
 
 	pending := info.NumPending
 	if pending == 0 {
@@ -447,17 +404,9 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 
 // Append appends a one or more events to the subject's event sequence.
 // It returns the resulting sequence number of the last appended event.
-func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...AppendOption) (uint64, error) {
+func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error) {
 	if len(events) == 0 {
 		return 0, ErrNoEvents
-	}
-
-	// Configure opts.
-	var o appendOpts
-	for _, opt := range opts {
-		if err := opt.appendOpt(&o); err != nil {
-			return 0, err
-		}
 	}
 
 	// Prepare messages.
@@ -554,7 +503,9 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		return nil, err
 	}
 	info := c.CachedInfo()
-	defer s.js.DeleteConsumer(ctx, s.name, info.Name)
+	defer func() {
+		_ = s.js.DeleteConsumer(ctx, s.name, info.Name)
+	}()
 
 	// Determine if we need to wait for catch-up.
 	var catchup bool
@@ -582,8 +533,6 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 			w.eh(fmt.Errorf("failed to evolve event: %w", err), ev, m)
 			return
 		}
-
-		m.Ack()
 
 		if catchup {
 			pending--

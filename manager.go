@@ -47,8 +47,8 @@ func WithClock(clock clock.Clock) ManagerOption {
 	})
 }
 
-// WithIdentifier sets a unique WithIdentifier generator implementation. Default is id.NUID.
-func WithIdentifier(id id.ID) ManagerOption {
+// WithIDer sets a unique ID generator implementation. Default is id.NUID.
+func WithIDer(id id.ID) ManagerOption {
 	return managerOption(func(o *Manager) error {
 		o.id = id
 		return nil

@@ -26,7 +26,7 @@ func BenchmarkModel__Decide(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		m.Decide(c)
+		_, _ = m.Decide(c)
 	}
 }
 
@@ -38,7 +38,7 @@ func BenchmarkModel__Evolve(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		m.Evolve(e)
+		_ = m.Evolve(e)
 	}
 }
 
@@ -50,6 +50,6 @@ func BenchmarkModel__View(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		m.View(fn)
+		_ = m.View(fn)
 	}
 }

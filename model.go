@@ -110,16 +110,6 @@ type Viewer[T any] interface {
 	View(func(T) error) error
 }
 
-// Sequencer represents an entity that can provide the last sequence number.
-type Sequencer interface {
-	LastSequence() uint64
-}
-
-// Appender represents an entity that can provide an append pattern.
-type Appender interface {
-	AppendPattern() string
-}
-
 // Model combines an Evolver, Decider, and Viewer for a specific type T.
 // It provides thread-safe access to the underlying interfaces and keeps track
 // of the last sequence number of events applied to the model.
@@ -130,9 +120,6 @@ type Model[T any] struct {
 	d Decider
 
 	mu sync.RWMutex
-
-	// pattern is the append pattern for the model
-	pattern string
 
 	// sseq is the start sequence of the model
 	sseq uint64
@@ -145,12 +132,6 @@ func (m *Model[T]) LastSequence() uint64 {
 	defer m.mu.RUnlock()
 	return m.lseq
 }
-
-/*
-func (m *Model[T]) AppendPattern() string {
-	return m.pattern
-}
-*/
 
 func (m *Model[T]) Evolve(event *Event) error {
 	if m.e == nil {
