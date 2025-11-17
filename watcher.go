@@ -22,13 +22,11 @@ func WithWatchFilters(filters ...string) WatchOption {
 	}
 }
 
-/*
 func WithWatchNoWait() WatchOption {
 	return func(w *watcher) {
 		w.nowait = true
 	}
 }
-*/
 
 type Watcher interface {
 	Stop()
