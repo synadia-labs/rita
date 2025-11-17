@@ -4,23 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
-	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-io/orbit.go/jetstreamext"
+	"github.com/synadia-labs/rita/clock"
 	"github.com/synadia-labs/rita/codec"
+	"github.com/synadia-labs/rita/id"
+	"github.com/synadia-labs/rita/types"
 )
 
 const (
-	eventEntityHdr     = "rita-entity"
-	eventTypeHdr       = "rita-type"
-	eventTimeHdr       = "rita-time"
-	eventCodecHdr      = "rita-codec"
-	eventMetaPrefixHdr = "rita-meta-"
+	eventEntityHdr     = "Rita-Entity"
+	eventTypeHdr       = "Rita-Type"
+	eventTimeHdr       = "Rita-Time"
+	eventCodecHdr      = "Rita-Codec"
+	eventMetaPrefixHdr = "Rita-Meta-"
 	eventTimeFormat    = time.RFC3339Nano
 )
 
@@ -30,250 +34,13 @@ var (
 	ErrEventEntityRequired = errors.New("rita: event entity required")
 	ErrEventEntityInvalid  = errors.New("rita: event entity invalid")
 	ErrEventTypeRequired   = errors.New("rita: event type required")
+	ErrNoEvents            = errors.New("rita: no events provided")
+
+	// Entity regex: <entity-type>.<entity-id>. Note this is just a basic validation
+	// to ensure there are two tokens separated by a dot. Invalid characters will be
+	// caught by NATS server when publishing.
+	entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
 )
-
-// validator can be optionally implemented by user-defined types and will be
-// validated in different contexts, such as before appending an event to a stream.
-type validator interface {
-	Validate() error
-}
-
-// Evolver is an interface that application-defined models can implement
-// to evolve their state based on events.
-type Evolver interface {
-	Evolve(event *Event) error
-}
-
-// Event is a wrapper for application-defined events.
-type Event struct {
-	// ID of the event. This will be used as the NATS msg ID
-	// for de-duplication.
-	ID string
-
-	// Identifier for specific entities.  Can be used to determine if
-	// an is related to a specific entity/node/endpoint/agent/etc.
-	// The format must be two tokens, e.g. "node.1234".
-	Entity string
-
-	// Time is the time of when the event occurred which may be different
-	// from the time the event is appended to the store. If no time is provided,
-	// the current local time will be used.
-	Time time.Time
-
-	// Type is a unique name for the event itself. This can be omitted
-	// if a type registry is being used, otherwise it must be set explicitly
-	// to identity the encoded data.
-	Type string
-
-	// Data is the event data. This must be a byte slice (pre-encoded) or a value
-	// of a type registered in the type registry.
-	Data any
-
-	// Metadata is application-defined metadata about the event.
-	Meta map[string]string
-
-	// subject is the the subject the event is associated with. Read-only.
-	subject string
-
-	// sequence is the sequence where this event exists in the stream. Read-only.
-	sequence uint64
-}
-
-type appendOpts struct {
-	expSubj string
-	expSeq  *uint64
-}
-
-type appendOptFn func(o *appendOpts) error
-
-func (f appendOptFn) appendOpt(o *appendOpts) error {
-	return f(o)
-}
-
-// AppendOption is an option for the event store Append operation.
-type AppendOption interface {
-	appendOpt(o *appendOpts) error
-}
-
-// ExpectSequence indicates that the expected sequence of the implicit subject should
-// be the value provided. If not, a conflict is indicated.
-func ExpectSequence(seq uint64) AppendOption {
-	return appendOptFn(func(o *appendOpts) error {
-		o.expSeq = &seq
-		return nil
-	})
-}
-
-// ExpectSequenceSubject indicates that the expected sequence of the explicit subject should
-// be the value provided. If not, a conflict is indicated.
-func ExpectSequenceSubject(seq uint64, subject string) AppendOption {
-	return appendOptFn(func(o *appendOpts) error {
-		pattern, err := parsePattern(subject)
-		if err != nil {
-			return err
-		}
-		o.expSeq = &seq
-		o.expSubj = pattern
-		return nil
-	})
-}
-
-type evolveOpts struct {
-	filters  []string
-	afterSeq *uint64
-	upToSeq  *uint64
-}
-
-type evolveOptFn func(o *evolveOpts) error
-
-func (f evolveOptFn) evolveOpt(o *evolveOpts) error {
-	return f(o)
-}
-
-// EvolveOption is an option for the event store Evolve operation.
-type EvolveOption interface {
-	evolveOpt(o *evolveOpts) error
-}
-
-// AfterSequence specifies the sequence of the first event that should be fetched
-// from the sequence up to the end of the sequence. This useful when partially applied
-// state has been derived up to a specific sequence and only the latest events need
-// to be fetched.
-func AfterSequence(seq uint64) EvolveOption {
-	return evolveOptFn(func(o *evolveOpts) error {
-		o.afterSeq = &seq
-		return nil
-	})
-}
-
-// UpToSequence specifies the sequence of the last event that should be fetched.
-// This is useful to control how much replay is performed when evolving a state.
-func UpToSequence(seq uint64) EvolveOption {
-	return evolveOptFn(func(o *evolveOpts) error {
-		o.upToSeq = &seq
-		return nil
-	})
-}
-
-// Filters specifies the subject filter to use when evolving state.
-// The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
-// or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well.
-func Filters(filters ...string) EvolveOption {
-	return evolveOptFn(func(o *evolveOpts) error {
-		o.filters = filters
-		return nil
-	})
-}
-
-// EventStore provides event store semantics over a NATS stream.
-type EventStore struct {
-	name          string
-	rt            *Rita
-	subjectPrefix string
-	subjectFunc   func(event *Event) string
-}
-
-var entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
-
-// wrapEvent wraps a user-defined event into the Event envelope. It performs
-// validation to ensure all the properties are either defined or defaults are set.
-func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
-	if event.Data == nil {
-		return nil, ErrEventDataRequired
-	}
-
-	if event.Entity == "" {
-		return nil, ErrEventEntityRequired
-	}
-	if !entityRegex.MatchString(event.Entity) {
-		return nil, ErrEventEntityInvalid
-	}
-
-	if s.rt.types == nil {
-		if event.Type == "" {
-			return nil, ErrEventTypeRequired
-		}
-	} else {
-		t, err := s.rt.types.Lookup(event.Data)
-		if err != nil {
-			return nil, err
-		}
-
-		if event.Type == "" {
-			event.Type = t
-		} else if event.Type != t {
-			return nil, fmt.Errorf("wrong type for event data: %s", event.Type)
-		}
-	}
-
-	if v, ok := event.Data.(validator); ok {
-		if err := v.Validate(); err != nil {
-			return nil, err
-		}
-	}
-
-	// Set ID if empty.
-	if event.ID == "" {
-		event.ID = s.rt.id.New()
-	}
-
-	// Set time if empty.
-	if event.Time.IsZero() {
-		event.Time = s.rt.clock.Now().Local()
-	}
-
-	return event, nil
-}
-
-// packEvent pack an event into a NATS message. The advantage of using NATS headers
-// is that the server supports creating a consumer that _only_ gets the headers
-// without the data as an optimization for some use cases.
-func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) {
-	// Marshal the data.
-	var (
-		data      []byte
-		err       error
-		codecName string
-	)
-
-	if s.rt.types == nil {
-		data, err = codec.Binary.Marshal(event.Data)
-		codecName = codec.Binary.Name()
-	} else {
-		data, err = s.rt.types.Marshal(event.Data)
-		codecName = s.rt.types.Codec().Name()
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	msg := nats.NewMsg(subject)
-	msg.Data = data
-
-	// Map event envelope to NATS header.
-	msg.Header.Set(nats.MsgIdHdr, event.ID)
-	msg.Header.Set(eventTypeHdr, event.Type)
-	msg.Header.Set(eventTimeHdr, event.Time.Format(eventTimeFormat))
-	msg.Header.Set(eventCodecHdr, codecName)
-	msg.Header.Set(eventEntityHdr, event.Entity)
-
-	for k, v := range event.Meta {
-		msg.Header.Set(fmt.Sprintf("%s%s", eventMetaPrefixHdr, k), v)
-	}
-
-	return msg, nil
-}
-
-// Decide is a convenience methods that combines the Decide and Append operations.
-func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) error {
-	events, err := model.Decide(cmd)
-	if err != nil {
-		return err
-	}
-
-	_, err = s.Append(ctx, events)
-	return err
-}
 
 // parsePattern parses a subject pattern into the full form
 func parsePattern(subject string) (string, error) {
@@ -299,6 +66,270 @@ func parsePattern(subject string) (string, error) {
 	return fmt.Sprintf("%s.%s.%s", ntoks[0], ntoks[1], ntoks[2]), nil
 }
 
+type appendOpts struct {
+	expSubj string
+	expSeq  *uint64
+}
+
+type appendOptFn func(o *appendOpts) error
+
+func (f appendOptFn) appendOpt(o *appendOpts) error {
+	return f(o)
+}
+
+// AppendOption is an option for the event store Append operation.
+type AppendOption interface {
+	appendOpt(o *appendOpts) error
+}
+
+/*
+// WithSequence indicates that the expected sequence of the implicit subject should
+// be the value provided. If not, a conflict is indicated.
+func WithSequence(seq uint64) AppendOption {
+	return appendOptFn(func(o *appendOpts) error {
+		o.expSeq = &seq
+		return nil
+	})
+}
+
+// WithSequenceSubject indicates that the expected sequence of the explicit subject should
+// be the value provided. If not, a conflict is indicated.
+func WithSequenceSubject(seq uint64, subject string) AppendOption {
+	return appendOptFn(func(o *appendOpts) error {
+		pattern, err := parsePattern(subject)
+		if err != nil {
+			return err
+		}
+		o.expSeq = &seq
+		o.expSubj = pattern
+		return nil
+	})
+}
+*/
+
+type evolveOpts struct {
+	filters  []string
+	afterSeq *uint64
+	stopSeq  *uint64
+}
+
+type evolveOptFn func(o *evolveOpts) error
+
+func (f evolveOptFn) evolveOpt(o *evolveOpts) error {
+	return f(o)
+}
+
+// EvolveOption is an option for the event store Evolve operation.
+type EvolveOption interface {
+	evolveOpt(o *evolveOpts) error
+}
+
+// WithAfterSequence specifies the sequence of the first event that should be fetched
+// from the sequence up to the end of the sequence. This useful when partially applied
+// state has been derived up to a specific sequence and only the latest events need
+// to be fetched.
+func WithAfterSequence(seq uint64) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.afterSeq = &seq
+		return nil
+	})
+}
+
+// WithStopSequence specifies the sequence of the last event that should be fetched.
+// This is useful to control how much replay is performed when evolving a state.
+func WithStopSequence(seq uint64) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.stopSeq = &seq
+		return nil
+	})
+}
+
+// WithFilters specifies the subject filter to use when evolving state.
+// The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
+// or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well at
+// any token position.
+func WithFilters(filters ...string) EvolveOption {
+	return evolveOptFn(func(o *evolveOpts) error {
+		o.filters = filters
+		return nil
+	})
+}
+
+// EventStore provides event store semantics over a NATS stream.
+type EventStore struct {
+	name string
+
+	nc *nats.Conn
+	js jetstream.JetStream
+
+	id     id.ID
+	clock  clock.Clock
+	types  *types.Registry
+	logger *slog.Logger
+}
+
+// wrapEvent wraps a user-defined event into the Event envelope. It performs
+// validation to ensure all the properties are either defined or defaults are set.
+func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
+	if event.Data == nil {
+		return nil, ErrEventDataRequired
+	}
+
+	if event.Entity == "" {
+		return nil, ErrEventEntityRequired
+	}
+	if !entityRegex.MatchString(event.Entity) {
+		return nil, ErrEventEntityInvalid
+	}
+
+	if s.types == nil {
+		if event.Type == "" {
+			return nil, ErrEventTypeRequired
+		}
+	} else {
+		t, err := s.types.Lookup(event.Data)
+		if err != nil {
+			return nil, err
+		}
+
+		if event.Type == "" {
+			event.Type = t
+		} else if event.Type != t {
+			return nil, fmt.Errorf("wrong type for event data: %s", event.Type)
+		}
+	}
+
+	// Set ID if empty.
+	if event.ID == "" {
+		event.ID = s.id.New()
+	}
+
+	// Set time if empty.
+	if event.Time.IsZero() {
+		event.Time = s.clock.Now().Local()
+	}
+
+	return event, nil
+}
+
+// packEvent pack an event into a NATS message. The advantage of using NATS headers
+// is that the server supports creating a consumer that _only_ gets the headers
+// without the data as an optimization for some use cases.
+func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) {
+	// Marshal the data.
+	var (
+		data      []byte
+		err       error
+		codecName string
+	)
+
+	if s.types == nil {
+		data, err = codec.Binary.Marshal(event.Data)
+		codecName = codec.Binary.Name()
+	} else {
+		data, err = s.types.Marshal(event.Data)
+		codecName = s.types.Codec().Name()
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	msg := nats.NewMsg(subject)
+	msg.Data = data
+
+	// Map event envelope to NATS header.
+	msg.Header.Set(nats.MsgIdHdr, event.ID)
+	msg.Header.Set(eventTypeHdr, event.Type)
+	msg.Header.Set(eventTimeHdr, event.Time.Format(eventTimeFormat))
+	msg.Header.Set(eventCodecHdr, codecName)
+	msg.Header.Set(eventEntityHdr, event.Entity)
+
+	for k, v := range event.Meta {
+		msg.Header.Set(fmt.Sprintf("%s%s", eventMetaPrefixHdr, k), v)
+	}
+
+	return msg, nil
+}
+
+// unpackEvent unpacks an Event from a NATS message.
+func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
+	eventType := msg.Headers().Get(eventTypeHdr)
+	codecName := msg.Headers().Get(eventCodecHdr)
+
+	var (
+		data any
+		err  error
+	)
+
+	c, ok := codec.Codecs[codecName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, codecName)
+	}
+
+	// No type registry, so assume byte slice.
+	if s.types == nil {
+		var b []byte
+		err = c.Unmarshal(msg.Data(), &b)
+		data = b
+	} else {
+		var v any
+		v, err = s.types.Init(eventType)
+		if err == nil {
+			err = c.Unmarshal(msg.Data(), v)
+			data = v
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var seq uint64
+	// If this message is not from a native JS subscription, the reply will not
+	// be set. This is where metadata is parsed from. In cases where a message is
+	// re-published, we don't want to fail if we can't get the sequence.
+	if msg.Reply() != "" {
+		md, err := msg.Metadata()
+		if err != nil {
+			return nil, fmt.Errorf("unpack: failed to get metadata: %s", err)
+		}
+		seq = md.Sequence.Stream
+	}
+
+	eventTime, err := time.Parse(eventTimeFormat, msg.Headers().Get(eventTimeHdr))
+	if err != nil {
+		return nil, fmt.Errorf("unpack: failed to parse event time: %s", err)
+	}
+
+	meta := make(map[string]string)
+
+	for h := range msg.Headers() {
+		if strings.HasPrefix(h, eventMetaPrefixHdr) {
+			key := h[len(eventMetaPrefixHdr):]
+			meta[key] = msg.Headers().Get(h)
+		}
+	}
+
+	return &Event{
+		ID:       msg.Headers().Get(nats.MsgIdHdr),
+		Entity:   msg.Headers().Get(eventEntityHdr),
+		Type:     msg.Headers().Get(eventTypeHdr),
+		Time:     eventTime,
+		Data:     data,
+		Meta:     meta,
+		subject:  msg.Subject(),
+		sequence: seq,
+	}, nil
+}
+
+// Decide is a convenience methods that combines the Decide and Append operations.
+func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command, opts ...AppendOption) (uint64, error) {
+	events, err := model.Decide(cmd)
+	if err != nil {
+		return 0, err
+	}
+	return s.Append(ctx, events, opts...)
+}
+
 // Evolve loads events and evolves a model of state. The sequence of the
 // last event that evolved the state is returned, including when an error
 // occurs. Note, the pattern can be several forms depending on the need.
@@ -309,8 +340,13 @@ func parsePattern(subject string) (string, error) {
 // only events of that specific type for that specific entity will be loaded.
 // Wildcards can be used as well.
 func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
-	// Configure opts.
 	var o evolveOpts
+	if s, ok := model.(Sequencer); ok {
+		seq := s.LastSequence()
+		o.afterSeq = &seq
+	}
+
+	// Configure opts.
 	for _, opt := range opts {
 		if err := opt.evolveOpt(&o); err != nil {
 			return 0, err
@@ -329,7 +365,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		if err != nil {
 			return 0, err
 		}
-		subjects[i] = fmt.Sprintf("%s.%s", s.subjectPrefix, pp)
+		subjects[i] = fmt.Sprintf("%s%s", fmt.Sprintf(eventStoreSubjectTmpl, s.name), pp)
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
@@ -349,19 +385,22 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	con, err := s.rt.js.OrderedConsumer(s.rt.ctx, s.name, sopts)
+	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
+	con, err := s.js.OrderedConsumer(ctx, name, sopts)
 	if err != nil {
 		return 0, err
 	}
-
 	// The number of messages to consume until we are caught up
 	// to the current known state.
-	pending := con.CachedInfo().NumPending
+	info := con.CachedInfo()
+	defer s.js.DeleteConsumer(ctx, s.name, info.Name)
 
+	pending := info.NumPending
 	if pending == 0 {
 		return 0, nil
 	}
 
+	// TODO: more efficient way to do this?
 	msgCtx, err := con.Messages()
 	if err != nil {
 		return 0, err
@@ -376,14 +415,14 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 			return 0, err
 		}
 
-		event, err := s.rt.UnpackEvent(msg)
+		event, err := s.unpackEvent(msg)
 		if err != nil {
 			return 0, err
 		}
 
 		// If up to sequence is set, break if the event sequence is greater than the up to sequence.
 		// This check is here in case there is a gap between sequence numbers.
-		if o.upToSeq != nil && event.sequence > *o.upToSeq {
+		if o.stopSeq != nil && event.sequence > *o.stopSeq {
 			break
 		}
 
@@ -393,7 +432,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		lastSeq = event.sequence
 
 		// Check if we've reached the up to sequence.
-		if o.upToSeq != nil && lastSeq == *o.upToSeq {
+		if o.stopSeq != nil && lastSeq == *o.stopSeq {
 			break
 		}
 
@@ -406,14 +445,13 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	return lastSeq, nil
 }
 
-func is212(nc *nats.Conn) bool {
-	v := nc.ConnectedServerVersion()
-	return strings.HasPrefix(v, "2.12.")
-}
-
 // Append appends a one or more events to the subject's event sequence.
 // It returns the resulting sequence number of the last appended event.
 func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...AppendOption) (uint64, error) {
+	if len(events) == 0 {
+		return 0, ErrNoEvents
+	}
+
 	// Configure opts.
 	var o appendOpts
 	for _, opt := range opts {
@@ -425,143 +463,143 @@ func (s *EventStore) Append(ctx context.Context, events []*Event, opts ...Append
 	// Prepare messages.
 	var msgs []*nats.Msg
 
-	for i, event := range events {
+	for _, event := range events {
 		e, err := s.wrapEvent(event)
 		if err != nil {
 			return 0, err
 		}
 
-		subject := s.subjectFunc(e)
+		subject := eventSubject(s.name, e)
 		msg, err := s.packEvent(subject, e)
 		if err != nil {
 			return 0, err
 		}
-		msg.Header.Set(nats.ExpectedStreamHdr, s.name)
 
-		if i == 0 {
-			if o.expSeq != nil {
-				if o.expSubj == "" {
-					idx := strings.LastIndex(subject, ".")
-					expSubj := fmt.Sprintf("%s.*", subject[:idx])
-					msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", *o.expSeq))
-					msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
-				} else {
-					expSubj := fmt.Sprintf("%s.%s", s.subjectPrefix, o.expSubj)
-					msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", *o.expSeq))
-					msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
+		if event.Expect != nil {
+			var expSubj string
+			if event.Expect.Pattern != "" {
+				pattern, err := parsePattern(event.Expect.Pattern)
+				if err != nil {
+					return 0, err
 				}
+				expSubj = fmt.Sprintf("%s%s", fmt.Sprintf(eventStoreSubjectTmpl, s.name), pattern)
+			} else {
+				// Get the subject up to the last token.
+				idx := strings.LastIndex(subject, ".")
+				expSubj = fmt.Sprintf("%s.*", subject[:idx])
 			}
+			msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
+			msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", event.Expect.Sequence))
 		}
 
 		msgs = append(msgs, msg)
 	}
 
-	// Use atomic publish for NATS Server 2.12+
-	if is212(s.rt.nc) {
-		ack, err := jetstreamext.PublishMsgBatch(ctx, s.rt.js, msgs)
+	if len(msgs) == 1 {
+		ack, err := s.js.PublishMsg(ctx, msgs[0])
 		if err != nil {
-			if strings.Contains(err.Error(), "wrong last sequence") {
-				return 0, ErrSequenceConflict
-			}
 			return 0, err
 		}
-
 		return ack.Sequence, nil
 	}
 
-	// Fallback to individual publishes for older servers.
-	var ack *jetstream.PubAck
-	var err error
-	for _, msg := range msgs {
-		ack, err = s.rt.js.PublishMsg(s.rt.ctx, msg)
-		if err != nil {
-			if strings.Contains(err.Error(), "wrong last sequence") {
-				return 0, ErrSequenceConflict
-			}
-			return 0, err
+	// Atomic batch publish.
+	ack, err := jetstreamext.PublishMsgBatch(ctx, s.js, msgs)
+	if err != nil {
+		if strings.Contains(err.Error(), "wrong last sequence") {
+			return 0, ErrSequenceConflict
 		}
+		return 0, err
 	}
 
 	return ack.Sequence, nil
 }
 
-// parseSubjectPrefix parses and validates that the subject prefix
-// ends with "*.*.*" or ">".
-func parseSubjectPrefix(s string) (string, error) {
-	toks := strings.Split(s, ".")
-	if len(toks) < 2 {
-		return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
+// Watch creates a watcher that asynchronously consumes events from the event store
+// and applies them to the provided Evolver. The watcher can be configured with
+// various options such as error handling and subject patterns to filter events.
+// Since this will update the Evolver asynchronously, the Evolver implementation must be
+// thread-safe. Use the `NewModel()` helper to create a thread-safe model.
+func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOption) (Watcher, error) {
+	w := &watcher{
+		e:   model,
+		mux: &sync.RWMutex{},
 	}
 
-	// Can be the only wildcard.
-	if toks[len(toks)-1] == ">" {
-		if slices.Contains(toks[:len(toks)-1], "*") {
-			return "", fmt.Errorf("wildcards not allowed before '>'")
+	for _, opt := range opts {
+		opt(w)
+	}
+
+	if w.eh == nil {
+		w.eh = func(err error, ev *Event, msg jetstream.Msg) {
+			s.logger.Error("watcher error", "error", err, "event", ev)
 		}
-
-		return s[:len(s)-2], nil
 	}
 
-	if len(toks) < 4 {
-		return "", fmt.Errorf("subject must have a prefix before '*.*.*'")
-	}
-
-	if toks[len(toks)-3] == "*" && toks[len(toks)-2] == "*" && toks[len(toks)-1] == "*" {
-		if slices.Contains(toks[:len(toks)-3], "*") {
-			return "", fmt.Errorf("wildcards not allowed before '*.*.*'")
+	// Build subjects from patterns.
+	subjects := make([]string, len(w.filters))
+	for i, p := range w.filters {
+		pp, err := parsePattern(p)
+		if err != nil {
+			return nil, err
 		}
-
-		// Three wildcard tokens and dots.
-		return s[:len(s)-6], nil
+		subjects[i] = fmt.Sprintf(eventStoreSubjectTmpl, s.name) + pp
 	}
 
-	return "", fmt.Errorf("subject must end with '*.*.*' or '>'")
-}
-
-// Create creates the event store given the configuration. The stream
-// name is the name of the store and the subjects default to "{name}.>".
-func (s *EventStore) Create(ctx context.Context, config *jetstream.StreamConfig) error {
-	if config == nil {
-		config = &jetstream.StreamConfig{}
-	}
-
-	config.Name = s.name
-	switch len(config.Subjects) {
-	case 1:
-	case 0:
-		config.Subjects = []string{fmt.Sprintf("%s.>", s.name)}
-	default:
-		return fmt.Errorf("only one subject is supported for event stores")
-	}
-
-	if is212(s.rt.nc) {
-		config.AllowAtomicPublish = true
-	}
-
-	prefix, err := parseSubjectPrefix(config.Subjects[0])
+	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
+	c, err := s.js.OrderedConsumer(ctx, name, jetstream.OrderedConsumerConfig{
+		FilterSubjects: subjects,
+	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	s.subjectPrefix = prefix
-	s.subjectFunc = func(event *Event) string {
-		return fmt.Sprintf("%s.%s.%s", prefix, event.Entity, event.Type)
+	info := c.CachedInfo()
+	defer s.js.DeleteConsumer(ctx, s.name, info.Name)
+
+	// Determine if we need to wait for catch-up.
+	var catchup bool
+	var pending uint64
+	done := make(chan struct{})
+	if !w.nowait {
+		pending = info.NumPending
+		catchup = pending > 0
+	} else {
+		catchup = false
+	}
+	if !catchup {
+		close(done)
 	}
 
-	_, err = s.rt.js.CreateStream(ctx, *config)
-	return err
-}
+	w.c = c
+	m, err := c.Consume(func(m jetstream.Msg) {
+		ev, err := s.unpackEvent(m)
+		if err != nil {
+			w.eh(fmt.Errorf("failed to unpack event: %w", err), nil, m)
+			return
+		}
 
-// Update updates the event store configuration.
-func (s *EventStore) Update(ctx context.Context, config *jetstream.StreamConfig) error {
-	if config == nil {
-		config = &jetstream.StreamConfig{}
+		if err := w.e.Evolve(ev); err != nil {
+			w.eh(fmt.Errorf("failed to evolve event: %w", err), ev, m)
+			return
+		}
+
+		m.Ack()
+
+		if catchup {
+			pending--
+			if pending == 0 {
+				close(done)
+				catchup = false
+			}
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
-	config.Name = s.name
-	_, err := s.rt.js.UpdateStream(ctx, *config)
-	return err
-}
 
-// Delete deletes the event store.
-func (s *EventStore) Delete(ctx context.Context) error {
-	return s.rt.js.DeleteStream(ctx, s.name)
+	w.m = m
+
+	<-done
+
+	return w, nil
 }

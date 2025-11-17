@@ -118,7 +118,7 @@ func BenchmarkInit(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = r.Init("a")
 	}
 }
@@ -136,7 +136,7 @@ func BenchmarkLookup(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = r.Lookup(v)
 	}
 }

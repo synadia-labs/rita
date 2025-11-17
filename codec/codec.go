@@ -17,6 +17,6 @@ var (
 
 type Codec interface {
 	Name() string
-	Marshal(interface{}) ([]byte, error)
-	Unmarshal([]byte, interface{}) error
+	Marshal(any) ([]byte, error)
+	Unmarshal([]byte, any) error
 }
