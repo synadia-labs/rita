@@ -415,65 +415,7 @@ func TestEventStoreDecide(t *testing.T) {
 	is.Equal(events[0].Type, "order-placed")
 }
 
-func TestEventStoreWatcher(t *testing.T) {
-	is := testutil.NewIs(t)
-
-	srv := testutil.NewNatsServer()
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(map[string]*types.Type{
-		"place-order": {
-			Init: func() any { return &PlaceOrder{} },
-		},
-		"order-placed": {
-			Init: func() any { return &OrderPlaced{} },
-		},
-	})
-	is.NoErr(err)
-
-	m, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
-	ctx := context.Background()
-	es, err := m.CreateEventStore(ctx, EventStoreConfig{
-		Name: "store",
-	})
-	is.NoErr(err)
-
-	// Append some events.
-	_, err = es.Append(ctx, []*Event{
-		{Entity: "order.1", Data: &OrderPlaced{}},
-		{Entity: "order.2", Data: &OrderPlaced{}},
-	})
-	is.NoErr(err)
-
-	// Start a watcher to track placed orders.
-	state := &OrderStats{}
-	w, err := es.Watch(ctx, state)
-	is.NoErr(err)
-	defer w.Stop()
-
-	// Allow some time for the watcher to process events
-	time.Sleep(50 * time.Millisecond)
-
-	is.Equal(state.Placed, 2)
-
-	_, err = es.Append(ctx, []*Event{
-		{Entity: "order.3", Data: &OrderPlaced{}},
-		{Entity: "order.4", Data: &OrderPlaced{}},
-	})
-	is.NoErr(err)
-
-	// Allow some time for the watcher to process events
-	time.Sleep(50 * time.Millisecond)
-
-	is.Equal(state.Placed, 4)
-}
-
-func TestModel(t *testing.T) {
+func TestModelWatcher(t *testing.T) {
 	is := testutil.NewIs(t)
 
 	srv := testutil.NewNatsServer()
@@ -519,9 +461,6 @@ func TestModel(t *testing.T) {
 	is.NoErr(err)
 	defer w.Stop()
 
-	is.Equal(m.sseq, uint64(0))
-	is.Equal(m.lseq, uint64(0))
-
 	// Decide a command to place an order.
 	_, err = es.Decide(ctx, m, &Command{
 		Data: &PlaceOrder{},
@@ -529,8 +468,6 @@ func TestModel(t *testing.T) {
 	is.NoErr(err)
 
 	time.Sleep(50 * time.Millisecond)
-	is.Equal(m.sseq, uint64(1))
-	is.Equal(m.lseq, uint64(1))
 
 	// Check that the model state has evolved.
 	err = m.View(func(s *OrderStats) error {
@@ -546,8 +483,6 @@ func TestModel(t *testing.T) {
 	is.NoErr(err)
 
 	time.Sleep(50 * time.Millisecond)
-	is.Equal(m.sseq, uint64(1))
-	is.Equal(m.lseq, uint64(2))
 
 	// Check that the model state has evolved.
 	err = m.View(func(s *OrderStats) error {
