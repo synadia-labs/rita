@@ -157,13 +157,19 @@ func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig)
 	}
 
 	jsc := &jetstream.StreamConfig{
-		Name:        fmt.Sprintf(eventStoreNameTmpl, config.Name),
-		Description: config.Description,
-		Replicas:    config.Replicas,
-		Placement:   config.Placement,
-		MaxMsgs:     config.MaxMsgs,
-		MaxAge:      config.MaxAge,
-		MaxBytes:    config.MaxBytes,
+		Name:               fmt.Sprintf(eventStoreNameTmpl, config.Name),
+		Description:        config.Description,
+		Metadata:           config.Metadata,
+		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
+		Replicas:           config.Replicas,
+		Storage:            config.Storage,
+		Placement:          config.Placement,
+		RePublish:          config.RePublish,
+		MaxMsgs:            config.MaxMsgs,
+		MaxAge:             config.MaxAge,
+		MaxBytes:           config.MaxBytes,
+		AllowAtomicPublish: true,
+		AllowDirect:        true,
 	}
 	_, err := m.js.UpdateStream(ctx, *jsc)
 	return err
