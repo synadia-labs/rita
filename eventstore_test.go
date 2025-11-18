@@ -449,6 +449,7 @@ func TestModelWatcher(t *testing.T) {
 
 	// Create a model for OrderStats.
 	m := NewModel(&OrderStats{})
+
 	w, err := es.Watch(ctx, m)
 	is.NoErr(err)
 	defer w.Stop()

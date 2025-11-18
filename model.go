@@ -38,8 +38,8 @@ type Event struct {
 	// for de-duplication.
 	ID string
 
-	// Identifier for specific entities.  Can be used to determine if
-	// an is related to a specific entity/node/endpoint/agent/etc.
+	// Identifier for specific entities. Can be used to determine if
+	// an event is related to a specific entity/node/endpoint/agent/etc.
 	// The format must be two tokens, e.g. "node.1234".
 	Entity string
 
@@ -119,12 +119,12 @@ type Model[T any] struct {
 	e Evolver
 	d Decider
 
-	mu sync.RWMutex
-
 	// sseq is the start sequence of the model
 	sseq uint64
 	// lseq is the last sequence of the model
 	lseq uint64
+
+	mu sync.RWMutex
 }
 
 func (m *Model[T]) LastSequence() uint64 {
@@ -135,7 +135,7 @@ func (m *Model[T]) LastSequence() uint64 {
 
 func (m *Model[T]) Evolve(event *Event) error {
 	if m.e == nil {
-		return errors.New("evolver not implemented")
+		return ErrEvolverNotImplemented
 	}
 
 	m.mu.Lock()
@@ -150,7 +150,7 @@ func (m *Model[T]) Evolve(event *Event) error {
 
 func (m *Model[T]) Decide(cmd *Command) ([]*Event, error) {
 	if m.d == nil {
-		return nil, errors.New("decider not implemented")
+		return nil, ErrDeciderNotImplemented
 	}
 
 	m.mu.RLock()
@@ -174,7 +174,11 @@ func (m *Model[T]) View(fn func(T) error) error {
 func NewModel[T any](t T) *Model[T] {
 	m := &Model[T]{}
 	m.t = t
+
+	// Type may implement neither, one, or both interfaces.
+	// Missing implementations will be caught at runtime when methods are called.
 	m.e, _ = any(t).(Evolver)
 	m.d, _ = any(t).(Decider)
+
 	return m
 }

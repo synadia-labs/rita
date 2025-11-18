@@ -1,8 +1,6 @@
 package rita
 
 import (
-	"sync"
-
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -40,8 +38,6 @@ type watcher struct {
 	filters []string
 
 	nowait bool
-
-	mux *sync.RWMutex
 }
 
 func (w *watcher) Stop() {

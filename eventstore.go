@@ -1,3 +1,4 @@
+// Package rita provides event sourcing abstractions built on NATS JetStream.
 package rita
 
 import (
@@ -7,7 +8,6 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -20,21 +20,24 @@ import (
 )
 
 const (
-	eventEntityHdr     = "Rita-Entity"
-	eventTypeHdr       = "Rita-Type"
-	eventTimeHdr       = "Rita-Time"
-	eventCodecHdr      = "Rita-Codec"
-	eventMetaPrefixHdr = "Rita-Meta-"
+	// Event metadata stored in NATS message headers for efficient filtering and header-only consumption.
+	eventEntityHdr     = "Rita-Entity" // Entity identifier (two-token format: "type.id")
+	eventTypeHdr       = "Rita-Type"   // Event type name
+	eventTimeHdr       = "Rita-Time"   // Event timestamp (RFC3339Nano)
+	eventCodecHdr      = "Rita-Codec"  // Codec used to serialize event data
+	eventMetaPrefixHdr = "Rita-Meta-"  // Prefix for custom metadata headers
 	eventTimeFormat    = time.RFC3339Nano
 )
 
 var (
-	ErrSequenceConflict    = errors.New("rita: sequence conflict")
-	ErrEventDataRequired   = errors.New("rita: event data required")
-	ErrEventEntityRequired = errors.New("rita: event entity required")
-	ErrEventEntityInvalid  = errors.New("rita: event entity invalid")
-	ErrEventTypeRequired   = errors.New("rita: event type required")
-	ErrNoEvents            = errors.New("rita: no events provided")
+	ErrSequenceConflict       = errors.New("rita: sequence conflict")
+	ErrEventDataRequired      = errors.New("rita: event data required")
+	ErrEventEntityRequired    = errors.New("rita: event entity required")
+	ErrEventEntityInvalid     = errors.New("rita: event entity invalid")
+	ErrEventTypeRequired      = errors.New("rita: event type required")
+	ErrNoEvents               = errors.New("rita: no events provided")
+	ErrEventStoreNameRequired = errors.New("rita: event store name is required")
+	ErrSubjectTooManyTokens   = errors.New("rita: subject can have at most three tokens")
 
 	// Entity regex: <entity-type>.<entity-id>. Note this is just a basic validation
 	// to ensure there are two tokens separated by a dot. Invalid characters will be
@@ -42,7 +45,9 @@ var (
 	entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
 )
 
-// parsePattern parses a subject pattern into the full form
+// parsePattern parses a subject pattern into the full form with exactly three tokens.
+// Empty patterns are expanded to "*.*.*". Individual tokens are not validated
+// as validation will happen downstream.
 func parsePattern(subject string) (string, error) {
 	if subject == "" {
 		return "*.*.*", nil
@@ -50,20 +55,20 @@ func parsePattern(subject string) (string, error) {
 
 	toks := strings.Split(subject, ".")
 	if len(toks) > 3 {
-		return "", fmt.Errorf("subject can have at most three tokens")
+		return "", ErrSubjectTooManyTokens
 	}
 
-	ntoks := make([]string, 3)
-	// Individual tokens are not validated since this will downstream.
-	for i := range ntoks {
-		if i < len(toks) {
-			ntoks[i] = toks[i]
-		} else {
-			ntoks[i] = "*"
-		}
+	// Pad with wildcards to reach three tokens
+	for len(toks) < 3 {
+		toks = append(toks, "*")
 	}
 
-	return fmt.Sprintf("%s.%s.%s", ntoks[0], ntoks[1], ntoks[2]), nil
+	return strings.Join(toks, "."), nil
+}
+
+// subjectPrefix returns the subject prefix for this EventStore combined with the given pattern.
+func (s *EventStore) subjectPrefix(pattern string) string {
+	return fmt.Sprintf(eventStoreSubjectTmpl, s.name) + pattern
 }
 
 type evolveOpts struct {
@@ -114,7 +119,8 @@ func WithFilters(filters ...string) EvolveOption {
 	})
 }
 
-// EventStore provides event store semantics over a NATS stream.
+// EventStore persists events to a JetStream stream and provides operations
+// to append, evolve, and watch events.
 type EventStore struct {
 	name string
 
@@ -127,8 +133,9 @@ type EventStore struct {
 	logger *slog.Logger
 }
 
-// wrapEvent wraps a user-defined event into the Event envelope. It performs
-// validation to ensure all the properties are either defined or defaults are set.
+// wrapEvent validates and enriches an event with defaults. It ensures the event has
+// required fields (data, entity, type), validates the entity format, and sets ID and
+// timestamp if not provided.
 func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 	if event.Data == nil {
 		return nil, ErrEventDataRequired
@@ -204,7 +211,7 @@ func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) 
 	msg.Header.Set(eventEntityHdr, event.Entity)
 
 	for k, v := range event.Meta {
-		msg.Header.Set(fmt.Sprintf("%s%s", eventMetaPrefixHdr, k), v)
+		msg.Header.Set(eventMetaPrefixHdr+k, v)
 	}
 
 	return msg, nil
@@ -249,29 +256,30 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 	if msg.Reply() != "" {
 		md, err := msg.Metadata()
 		if err != nil {
-			return nil, fmt.Errorf("unpack: failed to get metadata: %s", err)
+			return nil, fmt.Errorf("unpack: failed to get metadata: %w", err)
 		}
 		seq = md.Sequence.Stream
 	}
 
 	eventTime, err := time.Parse(eventTimeFormat, msg.Headers().Get(eventTimeHdr))
 	if err != nil {
-		return nil, fmt.Errorf("unpack: failed to parse event time: %s", err)
+		return nil, fmt.Errorf("unpack: failed to parse event time: %w", err)
 	}
 
 	meta := make(map[string]string)
 
-	for h := range msg.Headers() {
+	headers := msg.Headers()
+	for h := range headers {
 		if strings.HasPrefix(h, eventMetaPrefixHdr) {
 			key := h[len(eventMetaPrefixHdr):]
-			meta[key] = msg.Headers().Get(h)
+			meta[key] = headers.Get(h)
 		}
 	}
 
 	return &Event{
-		ID:       msg.Headers().Get(nats.MsgIdHdr),
-		Entity:   msg.Headers().Get(eventEntityHdr),
-		Type:     msg.Headers().Get(eventTypeHdr),
+		ID:       headers.Get(nats.MsgIdHdr),
+		Entity:   headers.Get(eventEntityHdr),
+		Type:     headers.Get(eventTypeHdr),
 		Time:     eventTime,
 		Data:     data,
 		Meta:     meta,
@@ -320,7 +328,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		if err != nil {
 			return 0, err
 		}
-		subjects[i] = fmt.Sprintf("%s%s", fmt.Sprintf(eventStoreSubjectTmpl, s.name), pp)
+		subjects[i] = s.subjectPrefix(pp)
 	}
 
 	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
@@ -349,7 +357,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// to the current known state.
 	info := con.CachedInfo()
 	defer func() {
-		_ = s.js.DeleteConsumer(ctx, s.name, info.Name)
+		_ = s.js.DeleteConsumer(ctx, name, info.Name)
 	}()
 
 	pending := info.NumPending
@@ -367,6 +375,11 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	var lastSeq uint64
 	var count uint64
 	for {
+		// Check if context has been cancelled
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+
 		msg, err := msgCtx.Next()
 		if err != nil {
 			return 0, err
@@ -431,7 +444,7 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 				if err != nil {
 					return 0, err
 				}
-				expSubj = fmt.Sprintf("%s%s", fmt.Sprintf(eventStoreSubjectTmpl, s.name), pattern)
+				expSubj = s.subjectPrefix(pattern)
 			} else {
 				// Get the subject up to the last token.
 				idx := strings.LastIndex(subject, ".")
@@ -471,8 +484,7 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 // thread-safe. Use the `NewModel()` helper to create a thread-safe model.
 func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOption) (Watcher, error) {
 	w := &watcher{
-		e:   model,
-		mux: &sync.RWMutex{},
+		e: model,
 	}
 
 	for _, opt := range opts {
@@ -492,7 +504,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		if err != nil {
 			return nil, err
 		}
-		subjects[i] = fmt.Sprintf(eventStoreSubjectTmpl, s.name) + pp
+		subjects[i] = s.subjectPrefix(pp)
 	}
 
 	name := fmt.Sprintf(eventStoreNameTmpl, s.name)

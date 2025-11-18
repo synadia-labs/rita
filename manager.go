@@ -16,8 +16,6 @@ import (
 const (
 	eventStoreNameTmpl    = "ES_%s"
 	eventStoreSubjectTmpl = "$ES.%s."
-	//stateStoreNameTmpl    = "SS_%s"
-	//stateStoreSubjectTmpl = "$SS.%s."
 )
 
 type managerOption func(o *Manager) error
@@ -63,7 +61,7 @@ func WithLogger(logger *slog.Logger) ManagerOption {
 }
 
 func eventSubject(name string, event *Event) string {
-	return fmt.Sprintf(eventStoreSubjectTmpl, name) + fmt.Sprintf("%s.%s", event.Entity, event.Type)
+	return fmt.Sprintf(eventStoreSubjectTmpl+"%s.%s", name, event.Entity, event.Type)
 }
 
 type EventStoreConfig struct {
@@ -78,7 +76,8 @@ type EventStoreConfig struct {
 	Metadata    map[string]string
 }
 
-// Manager is a manager for event and snapshot stores.
+// Manager creates and manages EventStore instances. It provides shared
+// dependencies (type registry, ID generator, clock) to all stores it creates.
 type Manager struct {
 	logger *slog.Logger
 	nc     *nats.Conn
@@ -89,6 +88,10 @@ type Manager struct {
 }
 
 func (m *Manager) GetEventStore(ctx context.Context, name string) (*EventStore, error) {
+	if name == "" {
+		return nil, ErrEventStoreNameRequired
+	}
+
 	e := &EventStore{
 		name: name,
 	}
@@ -109,7 +112,7 @@ func (m *Manager) GetEventStore(ctx context.Context, name string) (*EventStore, 
 // name is the name of the store and the subjects default to "{name}.>".
 func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig) (*EventStore, error) {
 	if config.Name == "" {
-		return nil, fmt.Errorf("event store name is required")
+		return nil, ErrEventStoreNameRequired
 	}
 
 	jsc := &jetstream.StreamConfig{
@@ -147,7 +150,7 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 // Update updates the event store configuration.
 func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig) error {
 	if config.Name == "" {
-		return fmt.Errorf("event store name is required")
+		return ErrEventStoreNameRequired
 	}
 
 	jsc := &jetstream.StreamConfig{
