@@ -67,13 +67,14 @@ func eventSubject(name string, event *Event) string {
 type EventStoreConfig struct {
 	Name        string
 	Description string
+	Metadata    map[string]string
 	Replicas    int
 	Storage     jetstream.StorageType
+	Placement   *jetstream.Placement
+	RePublish   *jetstream.RePublish
 	MaxMsgs     int64
 	MaxAge      time.Duration
 	MaxBytes    int64
-	Placement   *jetstream.Placement
-	Metadata    map[string]string
 }
 
 // Manager creates and manages EventStore instances. It provides shared
@@ -118,13 +119,15 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 	jsc := &jetstream.StreamConfig{
 		Name:               fmt.Sprintf(eventStoreNameTmpl, config.Name),
 		Description:        config.Description,
+		Metadata:           config.Metadata,
+		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
 		Replicas:           config.Replicas,
 		Storage:            config.Storage,
 		Placement:          config.Placement,
+		RePublish:          config.RePublish,
 		MaxMsgs:            config.MaxMsgs,
 		MaxAge:             config.MaxAge,
 		MaxBytes:           config.MaxBytes,
-		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
 		AllowAtomicPublish: true,
 		AllowDirect:        true,
 	}
