@@ -132,15 +132,15 @@ type Watcher interface {
 }
 
 type watcher struct {
-	e Evolver
-	m jetstream.ConsumeContext
-	c jetstream.Consumer
+	model  Evolver
+	conCtx jetstream.ConsumeContext
+	con    jetstream.Consumer
 
 	opts *options
 }
 
 func (w *watcher) Stop() {
-	w.m.Drain()
+	w.conCtx.Drain()
 }
 
 // EvolveOption is an option for the event store Evolve operation.
@@ -579,9 +579,6 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	// The number of messages to consume until we are caught up
 	// to the current known state.
 	info := con.CachedInfo()
-	defer func() {
-		_ = s.js.DeleteConsumer(ctx, name, info.Name)
-	}()
 
 	// Determine if we need to wait for catch-up.
 	var catchup bool
@@ -597,7 +594,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		close(done)
 	}
 
-	m, err := con.Consume(func(m jetstream.Msg) {
+	conCtx, err := con.Consume(func(m jetstream.Msg) {
 		ev, err := s.unpackEvent(m)
 		if err != nil {
 			o.errHandler(fmt.Errorf("failed to unpack event: %w", err), nil, m)
@@ -624,10 +621,10 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	<-done
 
 	w := &watcher{
-		e:    model,
-		c:    con,
-		m:    m,
-		opts: &o,
+		model:  model,
+		con:    con,
+		conCtx: conCtx,
+		opts:   &o,
 	}
 
 	return w, nil
