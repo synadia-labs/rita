@@ -71,29 +71,36 @@ func (s *EventStore) subjectPrefix(pattern string) string {
 	return fmt.Sprintf(eventStoreSubjectTmpl, s.name) + pattern
 }
 
-type evolveOpts struct {
+type options struct {
 	filters  []string
 	afterSeq *uint64
-	stopSeq  *uint64
+
+	// Evolve only
+	stopSeq *uint64
+
+	// Watch only
+	noWait     bool
+	errHandler func(error, *Event, jetstream.Msg)
 }
 
-type evolveOptFn func(o *evolveOpts) error
+type evolveOptFn func(o *options) error
 
-func (f evolveOptFn) evolveOpt(o *evolveOpts) error {
+func (f evolveOptFn) setOpt(o *options) error {
 	return f(o)
 }
 
 // EvolveOption is an option for the event store Evolve operation.
 type EvolveOption interface {
-	evolveOpt(o *evolveOpts) error
+	setOpt(o *options) error
 }
 
 // WithAfterSequence specifies the sequence of the first event that should be fetched
 // from the sequence up to the end of the sequence. This useful when partially applied
 // state has been derived up to a specific sequence and only the latest events need
 // to be fetched.
+// This can be passed in `Evolve` and `Watch`.
 func WithAfterSequence(seq uint64) EvolveOption {
-	return evolveOptFn(func(o *evolveOpts) error {
+	return evolveOptFn(func(o *options) error {
 		o.afterSeq = &seq
 		return nil
 	})
@@ -102,7 +109,7 @@ func WithAfterSequence(seq uint64) EvolveOption {
 // WithStopSequence specifies the sequence of the last event that should be fetched.
 // This is useful to control how much replay is performed when evolving a state.
 func WithStopSequence(seq uint64) EvolveOption {
-	return evolveOptFn(func(o *evolveOpts) error {
+	return evolveOptFn(func(o *options) error {
 		o.stopSeq = &seq
 		return nil
 	})
@@ -112,9 +119,53 @@ func WithStopSequence(seq uint64) EvolveOption {
 // The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
 // or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well at
 // any token position.
+// This can be passed in `Evolve` and `Watch`.
 func WithFilters(filters ...string) EvolveOption {
-	return evolveOptFn(func(o *evolveOpts) error {
+	return evolveOptFn(func(o *options) error {
 		o.filters = filters
+		return nil
+	})
+}
+
+type Watcher interface {
+	Stop()
+}
+
+type watcher struct {
+	e Evolver
+	m jetstream.ConsumeContext
+	c jetstream.Consumer
+
+	opts *options
+}
+
+func (w *watcher) Stop() {
+	w.m.Drain()
+}
+
+// EvolveOption is an option for the event store Evolve operation.
+type WatchOption interface {
+	setOpt(*options) error
+}
+
+type watchOptFn func(o *options) error
+
+func (f watchOptFn) setOpt(o *options) error {
+	return f(o)
+}
+
+// WithErrHandler sets the error handler function for the watcher.
+func WithErrHandler(fn func(error, *Event, jetstream.Msg)) WatchOption {
+	return watchOptFn(func(o *options) error {
+		o.errHandler = fn
+		return nil
+	})
+}
+
+// WithNoWait configures the watcher to not wait for catch-up before returning.
+func WithNoWait() WatchOption {
+	return watchOptFn(func(o *options) error {
+		o.noWait = true
 		return nil
 	})
 }
@@ -307,18 +358,13 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) (u
 // only events of that specific type for that specific entity will be loaded.
 // Wildcards can be used as well.
 func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
-	var o evolveOpts
+	var o options
 
 	// Configure opts.
 	for _, opt := range opts {
-		if err := opt.evolveOpt(&o); err != nil {
+		if err := opt.setOpt(&o); err != nil {
 			return 0, err
 		}
-	}
-
-	// If still no patterns, default to all.
-	if len(o.filters) == 0 {
-		o.filters = []string{"*.*.*"}
 	}
 
 	// Build subjects from patterns.
@@ -353,6 +399,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	if err != nil {
 		return 0, err
 	}
+
 	// The number of messages to consume until we are caught up
 	// to the current known state.
 	info := con.CachedInfo()
@@ -483,23 +530,22 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 // Since this will update the Evolver asynchronously, the Evolver implementation must be
 // thread-safe. Use the `NewModel()` helper to create a thread-safe model.
 func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOption) (Watcher, error) {
-	w := &watcher{
-		e: model,
-	}
-
+	var o options
 	for _, opt := range opts {
-		opt(w)
+		if err := opt.setOpt(&o); err != nil {
+			return nil, err
+		}
 	}
 
-	if w.eh == nil {
-		w.eh = func(err error, ev *Event, msg jetstream.Msg) {
+	if o.errHandler == nil {
+		o.errHandler = func(err error, ev *Event, msg jetstream.Msg) {
 			s.logger.Error("watcher error", "error", err, "event", ev)
 		}
 	}
 
 	// Build subjects from patterns.
-	subjects := make([]string, len(w.filters))
-	for i, p := range w.filters {
+	subjects := make([]string, len(o.filters))
+	for i, p := range o.filters {
 		pp, err := parsePattern(p)
 		if err != nil {
 			return nil, err
@@ -507,23 +553,41 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		subjects[i] = s.subjectPrefix(pp)
 	}
 
-	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
-	c, err := s.js.OrderedConsumer(ctx, name, jetstream.OrderedConsumerConfig{
+	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
+	sopts := jetstream.OrderedConsumerConfig{
 		FilterSubjects: subjects,
-	})
+	}
+
+	// Set starting point.
+	if o.afterSeq != nil {
+		if *o.afterSeq == 0 {
+			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
+		} else {
+			sopts.OptStartSeq = *o.afterSeq + 1
+			sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		}
+	} else {
+		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
+	}
+
+	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
+	con, err := s.js.OrderedConsumer(ctx, name, sopts)
 	if err != nil {
 		return nil, err
 	}
-	info := c.CachedInfo()
+
+	// The number of messages to consume until we are caught up
+	// to the current known state.
+	info := con.CachedInfo()
 	defer func() {
-		_ = s.js.DeleteConsumer(ctx, s.name, info.Name)
+		_ = s.js.DeleteConsumer(ctx, name, info.Name)
 	}()
 
 	// Determine if we need to wait for catch-up.
 	var catchup bool
 	var pending uint64
 	done := make(chan struct{})
-	if !w.nowait {
+	if !o.noWait {
 		pending = info.NumPending
 		catchup = pending > 0
 	} else {
@@ -533,16 +597,15 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		close(done)
 	}
 
-	w.c = c
-	m, err := c.Consume(func(m jetstream.Msg) {
+	m, err := con.Consume(func(m jetstream.Msg) {
 		ev, err := s.unpackEvent(m)
 		if err != nil {
-			w.eh(fmt.Errorf("failed to unpack event: %w", err), nil, m)
+			o.errHandler(fmt.Errorf("failed to unpack event: %w", err), nil, m)
 			return
 		}
 
-		if err := w.e.Evolve(ev); err != nil {
-			w.eh(fmt.Errorf("failed to evolve event: %w", err), ev, m)
+		if err := model.Evolve(ev); err != nil {
+			o.errHandler(fmt.Errorf("failed to evolve event: %w", err), ev, m)
 			return
 		}
 
@@ -558,9 +621,14 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		return nil, err
 	}
 
-	w.m = m
-
 	<-done
+
+	w := &watcher{
+		e:    model,
+		c:    con,
+		m:    m,
+		opts: &o,
+	}
 
 	return w, nil
 }
