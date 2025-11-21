@@ -1,4 +1,3 @@
-// Package rita provides event sourcing abstractions built on NATS JetStream.
 package rita
 
 import (
