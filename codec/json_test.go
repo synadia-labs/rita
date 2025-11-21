@@ -30,7 +30,7 @@ func BenchmarkJSONMarshal(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = JSON.Marshal(v1)
 	}
 }
@@ -63,7 +63,7 @@ func BenchmarkJSONUnmarshal(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = JSON.Unmarshal(y, &v2)
 	}
 }

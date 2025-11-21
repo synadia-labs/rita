@@ -30,7 +30,7 @@ func BenchmarkMsgPackMarshal(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = MsgPack.Marshal(v1)
 	}
 }
@@ -63,7 +63,7 @@ func BenchmarkMsgPackUnmarshal(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = MsgPack.Unmarshal(y, &v2)
 	}
 }

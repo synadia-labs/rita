@@ -14,10 +14,10 @@ func (*msgpackCodec) Name() string {
 	return "msgpack"
 }
 
-func (*msgpackCodec) Marshal(v interface{}) ([]byte, error) {
+func (*msgpackCodec) Marshal(v any) ([]byte, error) {
 	return msgpack.Marshal(v)
 }
 
-func (*msgpackCodec) Unmarshal(b []byte, v interface{}) error {
+func (*msgpackCodec) Unmarshal(b []byte, v any) error {
 	return msgpack.Unmarshal(b, v)
 }

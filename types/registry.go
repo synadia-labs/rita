@@ -19,6 +19,11 @@ var (
 	nameRegex = regexp.MustCompile(`^[\w-]+(\.[\w-]+)*$`)
 )
 
+// Validator can be optionally implemented on user-defined types.
+type Validator interface {
+	Validate() error
+}
+
 func validateTypeName(n string) error {
 	if !nameRegex.MatchString(n) {
 		return fmt.Errorf("%w: name %q has invalid characters", ErrTypeNotValid, n)
@@ -109,12 +114,12 @@ func (r *Registry) validate(name string, typ *Type) error {
 	// Ensure [de]serialization works in the base case.
 	b, err := r.codec.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("%w: %s: failed to marshal with codec: %s", ErrTypeNotValid, name, err)
+		return fmt.Errorf("%w: %s: failed to marshal with codec: %w", ErrTypeNotValid, name, err)
 	}
 
 	err = r.codec.Unmarshal(b, v)
 	if err != nil {
-		return fmt.Errorf("%w: %s: failed to unmarshal with codec: %s", ErrTypeNotValid, name, err)
+		return fmt.Errorf("%w: %s: failed to unmarshal with codec: %w", ErrTypeNotValid, name, err)
 	}
 
 	return nil
@@ -156,6 +161,12 @@ func (r *Registry) Lookup(v any) (string, error) {
 // Marshal serializes the value to a byte slice. This call
 // validates the type is registered and delegates to the codec.
 func (r *Registry) Marshal(v any) ([]byte, error) {
+	if vv, ok := v.(Validator); ok {
+		if err := vv.Validate(); err != nil {
+			return nil, err
+		}
+	}
+
 	_, err := r.Lookup(v)
 	if err != nil {
 		return nil, err

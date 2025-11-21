@@ -7,16 +7,18 @@ var (
 
 	Default = JSON
 
-	Codecs = map[string]Codec{
-		Binary.Name():   Binary,
-		JSON.Name():     JSON,
-		MsgPack.Name():  MsgPack,
-		ProtoBuf.Name(): ProtoBuf,
-	}
+	Codecs map[string]Codec
 )
+
+func init() {
+	Codecs = make(map[string]Codec)
+	for _, c := range []Codec{Binary, JSON, MsgPack, ProtoBuf} {
+		Codecs[c.Name()] = c
+	}
+}
 
 type Codec interface {
 	Name() string
-	Marshal(interface{}) ([]byte, error)
-	Unmarshal([]byte, interface{}) error
+	Marshal(any) ([]byte, error)
+	Unmarshal([]byte, any) error
 }

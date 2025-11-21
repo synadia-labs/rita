@@ -15,7 +15,7 @@ func (*binaryCodec) Name() string {
 	return "binary"
 }
 
-func (*binaryCodec) Marshal(v interface{}) ([]byte, error) {
+func (*binaryCodec) Marshal(v any) ([]byte, error) {
 	// Check for native implementation.
 	if m, ok := v.(encoding.BinaryMarshaler); ok {
 		return m.MarshalBinary()
@@ -30,7 +30,7 @@ func (*binaryCodec) Marshal(v interface{}) ([]byte, error) {
 	return b, nil
 }
 
-func (*binaryCodec) Unmarshal(b []byte, v interface{}) error {
+func (*binaryCodec) Unmarshal(b []byte, v any) error {
 	// Check for native implementation.
 	if u, ok := v.(encoding.BinaryUnmarshaler); ok {
 		return u.UnmarshalBinary(b)
