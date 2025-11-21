@@ -415,7 +415,7 @@ func TestEventStoreDecide(t *testing.T) {
 
 	state := &OrderStats{}
 
-	seq, err := es.Decide(ctx, state, cmd)
+	_, seq, err := es.Decide(ctx, state, cmd)
 	is.NoErr(err)
 	is.Equal(seq, uint64(1))
 
@@ -455,7 +455,7 @@ func TestModelWatcher(t *testing.T) {
 	defer w.Stop()
 
 	// Decide a command to place an order.
-	_, err = es.Decide(ctx, m, &Command{
+	_, _, err = es.Decide(ctx, m, &Command{
 		Data: &PlaceOrder{},
 	})
 	is.NoErr(err)
@@ -470,7 +470,7 @@ func TestModelWatcher(t *testing.T) {
 	is.NoErr(err)
 
 	// Decide a command to ship an order.
-	_, err = es.Decide(ctx, m, &Command{
+	_, _, err = es.Decide(ctx, m, &Command{
 		Data: &ShipOrder{},
 	})
 	is.NoErr(err)

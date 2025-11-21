@@ -338,13 +338,43 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-// Decide is a convenience methods that combines the Decide and Append operations.
-func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) (uint64, error) {
+// Decide is a convenience methods that combines a model's Decide invocation
+// followed by an Append. If either step fails, an error is returned.
+func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([]*Event, uint64, error) {
 	events, err := model.Decide(cmd)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	return s.Append(ctx, events)
+
+	seq, err := s.Append(ctx, events)
+	if err != nil {
+		return events, 0, err
+	}
+
+	return events, seq, nil
+}
+
+// DecideAndEvolve is a convenience methods that decides, store, and evolves a model
+// in one operation. If any step fails, an error is returned. Note, that is the evolve
+// step fails, the events have already been stored.
+func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
+	events, err := model.Decide(cmd)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	seq, err := s.Append(ctx, events)
+	if err != nil {
+		return events, 0, err
+	}
+
+	for _, ev := range events {
+		if err := model.Evolve(ev); err != nil {
+			return events, seq, err
+		}
+	}
+
+	return events, seq, nil
 }
 
 // Evolve loads events and evolves a model of state. The sequence of the

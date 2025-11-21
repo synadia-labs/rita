@@ -110,6 +110,11 @@ type Viewer[T any] interface {
 	View(func(T) error) error
 }
 
+type DeciderEvolver interface {
+	Decider
+	Evolver
+}
+
 // Model combines an Evolver, Decider, and Viewer for a specific type T.
 // It provides thread-safe access to the underlying interfaces and keeps track
 // of the last sequence number of events applied to the model.
@@ -136,6 +141,11 @@ func (m *Model[T]) LastSequence() uint64 {
 func (m *Model[T]) Evolve(event *Event) error {
 	if m.e == nil {
 		return ErrEvolverNotImplemented
+	}
+
+	// Already applied
+	if m.lseq >= event.sequence {
+		return nil
 	}
 
 	m.mu.Lock()
