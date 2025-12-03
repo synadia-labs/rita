@@ -44,7 +44,7 @@ func TestModelDecideEvolve(t *testing.T) {
 
 	evt, err := stateModel.Decide(cmd)
 	is.NoErr(err)
-	is.Equal(state.Decisions, 1)
+	is.Equal(len(evt), 1)
 
 	seq, err := es.Append(ctx, evt)
 	is.NoErr(err)

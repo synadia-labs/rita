@@ -52,26 +52,21 @@ type OrderStats struct {
 	Placed   int
 	Canceled int
 	Shipped  int
-
-	Decisions int
 }
 
 func (s *OrderStats) Decide(cmd *Command) ([]*Event, error) {
 	switch cmd.Data.(type) {
 	case *PlaceOrder:
-		s.Decisions++
 		return []*Event{
 			{Entity: "store.1", Data: &OrderPlaced{}},
 		}, nil
 
 	case *CancelOrder:
-		s.Decisions++
 		return []*Event{
 			{Entity: "store.1", Data: &OrderCanceled{}},
 		}, nil
 
 	case *ShipOrder:
-		s.Decisions++
 		return []*Event{
 			{Entity: "store.1", Data: &OrderShipped{}},
 		}, nil
