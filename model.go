@@ -1,6 +1,7 @@
 package rita
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -173,6 +174,36 @@ func (m *Model[T]) Decide(cmd *Command) ([]*Event, error) {
 		events[0].Expect = ExpectSequence(m.lseq)
 	}
 	return events, nil
+}
+
+func (m *Model[T]) DecideAndEvolve(cmd *Command, es *EventStore) ([]*Event, uint64, error) {
+	if _, ok := any(m.d).(Decider); !ok {
+		return nil, 0, ErrDeciderNotImplemented
+	}
+	if _, ok := any(m.e).(Evolver); !ok {
+		return nil, 0, ErrEvolverNotImplemented
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	events, err := m.d.Decide(cmd)
+	if err != nil {
+		return nil, m.lseq, err
+	}
+
+	seq, err := es.Append(context.TODO(), events)
+	if err != nil {
+		return events, 0, err
+	}
+
+	for _, ev := range events {
+		if err := m.e.Evolve(ev); err != nil {
+			return events, seq, err
+		}
+	}
+
+	return events, seq, nil
 }
 
 func (m *Model[T]) View(fn func(T) error) error {
