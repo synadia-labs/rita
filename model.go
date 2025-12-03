@@ -184,18 +184,19 @@ func (m *Model[T]) DecideAndEvolve(cmd *Command, es *EventStore) ([]*Event, uint
 		return nil, 0, ErrEvolverNotImplemented
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	events, err := m.d.Decide(cmd)
 	if err != nil {
 		return nil, m.lseq, err
 	}
 
+	m.mu.Lock()
+
 	seq, err := es.Append(context.TODO(), events)
 	if err != nil {
 		return events, 0, err
 	}
+
+	m.mu.Unlock()
 
 	for _, ev := range events {
 		if err := m.e.Evolve(ev); err != nil {
