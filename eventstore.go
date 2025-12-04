@@ -369,6 +369,8 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	}
 
 	for _, ev := range events {
+		ev.sequence = seq - uint64(len(events)) + 1
+
 		if err := model.Evolve(ev); err != nil {
 			return events, seq, err
 		}
