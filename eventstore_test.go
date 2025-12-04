@@ -426,6 +426,73 @@ func TestEventStoreDecide(t *testing.T) {
 	is.Equal(events[0].Type, "order-placed")
 }
 
+func TestEventStoreDecideAndEvolve(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServer()
+	defer testutil.ShutdownNatsServer(srv)
+
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
+
+	tr, err := types.NewRegistry(registry)
+	is.NoErr(err)
+
+	m, err := New(nc, WithRegistry(tr))
+	is.NoErr(err)
+
+	ctx := context.Background()
+	es, err := m.CreateEventStore(ctx, EventStoreConfig{
+		Name: "store",
+	})
+	is.NoErr(err)
+
+	state := &OrderStats{}
+	model := NewModel(state)
+
+	// First command: place an order
+	events, seq, err := es.DecideAndEvolve(ctx, model, &Command{
+		Data: &PlaceOrder{},
+	})
+	is.NoErr(err)
+	is.Equal(seq, uint64(1))
+	is.Equal(len(events), 1)
+	is.Equal(state.Placed, 1)
+	is.Equal(state.Shipped, 0)
+	is.Equal(state.Canceled, 0)
+
+	// Second command: ship an order
+	events, seq, err = es.DecideAndEvolve(ctx, model, &Command{
+		Data: &ShipOrder{},
+	})
+	is.NoErr(err)
+	is.Equal(seq, uint64(2))
+	is.Equal(len(events), 1)
+	is.Equal(state.Placed, 1)
+	is.Equal(state.Shipped, 1)
+	is.Equal(state.Canceled, 0)
+
+	// Third command: cancel an order
+	events, seq, err = es.DecideAndEvolve(ctx, model, &Command{
+		Data: &CancelOrder{},
+	})
+	is.NoErr(err)
+	is.Equal(seq, uint64(3))
+	is.Equal(len(events), 1)
+	is.Equal(state.Placed, 1)
+	is.Equal(state.Shipped, 1)
+	is.Equal(state.Canceled, 1)
+
+	// Verify events are also persisted by evolving a fresh state
+	var freshState OrderStats
+	lastSeq, err := es.Evolve(ctx, &freshState)
+	is.NoErr(err)
+	is.Equal(lastSeq, uint64(3))
+	is.Equal(freshState.Placed, 1)
+	is.Equal(freshState.Shipped, 1)
+	is.Equal(freshState.Canceled, 1)
+}
+
 func TestModelWatcher(t *testing.T) {
 	is := testutil.NewIs(t)
 
