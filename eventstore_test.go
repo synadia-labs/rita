@@ -96,7 +96,7 @@ func (es *eventSlice) Evolve(event *Event) error {
 func TestEventStoreNoRegistry(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer()
+	srv := testutil.NewNatsServer(t)
 	defer testutil.ShutdownNatsServer(srv)
 
 	nc, err := nats.Connect(srv.ClientURL())
@@ -361,7 +361,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		},
 	}
 
-	srv := testutil.NewNatsServer()
+	srv := testutil.NewNatsServer(t)
 	defer testutil.ShutdownNatsServer(srv)
 
 	nc, _ := nats.Connect(srv.ClientURL())
@@ -391,7 +391,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 func TestEventStoreDecide(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer()
+	srv := testutil.NewNatsServer(t)
 	defer testutil.ShutdownNatsServer(srv)
 
 	nc, err := nats.Connect(srv.ClientURL())
@@ -429,7 +429,7 @@ func TestEventStoreDecide(t *testing.T) {
 func TestEventStoreDecideAndEvolve(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer()
+	srv := testutil.NewNatsServer(t)
 	defer testutil.ShutdownNatsServer(srv)
 
 	nc, err := nats.Connect(srv.ClientURL())
@@ -496,7 +496,7 @@ func TestEventStoreDecideAndEvolve(t *testing.T) {
 func TestModelWatcher(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer()
+	srv := testutil.NewNatsServer(t)
 	defer testutil.ShutdownNatsServer(srv)
 
 	nc, err := nats.Connect(srv.ClientURL())
@@ -551,4 +551,57 @@ func TestModelWatcher(t *testing.T) {
 		return nil
 	})
 	is.NoErr(err)
+}
+
+type mixedEntitiesModel struct{}
+
+func (m *mixedEntitiesModel) Decide(cmd *Command) ([]*Event, error) {
+	return []*Event{
+		{Entity: "order.1", Data: &OrderPlaced{}},
+		{Entity: "order.2", Data: &OrderPlaced{}},
+		{Entity: "order.2", Data: &OrderPlaced{}},
+	}, nil
+}
+
+func (m *mixedEntitiesModel) Evolve(event *Event) error {
+	return nil
+}
+
+func TestMixedEntities(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServer(t)
+	defer testutil.ShutdownNatsServer(srv)
+
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
+
+	tr, err := types.NewRegistry(registry)
+	is.NoErr(err)
+
+	mgr, err := New(nc, WithRegistry(tr))
+	is.NoErr(err)
+
+	ctx := context.Background()
+	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{
+		Name: "store",
+	})
+	is.NoErr(err)
+
+	m := NewModel(&mixedEntitiesModel{})
+	w, err := es.Watch(ctx, m)
+	is.NoErr(err)
+	defer w.Stop()
+
+	events, seq, err := es.Decide(ctx, m, nil)
+	is.NoErr(err)
+	is.Equal(seq, uint64(3))
+	is.Equal(len(events), 3)
+
+	time.Sleep(50 * time.Millisecond)
+
+	events, seq, err = es.Decide(ctx, m, nil)
+	is.NoErr(err)
+	is.Equal(seq, uint64(6))
+	is.Equal(len(events), 3)
 }

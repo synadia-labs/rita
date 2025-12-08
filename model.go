@@ -2,6 +2,7 @@ package rita
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -115,6 +116,65 @@ type DeciderEvolver interface {
 	Evolver
 }
 
+type entityMap struct {
+	sseq map[string]map[string]uint64
+	lseq map[string]map[string]uint64
+}
+
+func (em *entityMap) get(entity string, m map[string]map[string]uint64) uint64 {
+	idx := strings.IndexByte(entity, '.')
+	if idx < 0 {
+		return 0
+	}
+
+	pattern := entity[:idx]
+	id := entity[idx+1:]
+	if pm, ok := m[pattern]; ok {
+		if seq, ok := pm[id]; ok {
+			return seq
+		}
+	}
+
+	return 0
+}
+
+func (em *entityMap) set(entity string, seq uint64, m map[string]map[string]uint64) {
+	idx := strings.IndexByte(entity, '.')
+	if idx < 0 {
+		return
+	}
+
+	pattern := entity[:idx]
+	id := entity[idx+1:]
+	if _, ok := m[pattern]; !ok {
+		m[pattern] = make(map[string]uint64)
+	}
+	m[pattern][id] = seq
+}
+
+func (em *entityMap) GetStart(entity string) uint64 {
+	return em.get(entity, em.sseq)
+}
+
+func (em *entityMap) SetStart(entity string, seq uint64) {
+	em.set(entity, seq, em.sseq)
+}
+
+func (em *entityMap) GetLast(entity string) uint64 {
+	return em.get(entity, em.lseq)
+}
+
+func (em *entityMap) SetLast(entity string, seq uint64) {
+	em.set(entity, seq, em.lseq)
+}
+
+func newEntityMap() *entityMap {
+	return &entityMap{
+		sseq: make(map[string]map[string]uint64),
+		lseq: make(map[string]map[string]uint64),
+	}
+}
+
 // Model combines an Evolver, Decider, and Viewer for a specific type T.
 // It provides thread-safe access to the underlying interfaces and keeps track
 // of the last sequence number of events applied to the model.
@@ -124,18 +184,9 @@ type Model[T any] struct {
 	e Evolver
 	d Decider
 
-	// sseq is the start sequence of the model
-	sseq uint64
-	// lseq is the last sequence of the model
-	lseq uint64
+	seqs *entityMap
 
 	mu sync.RWMutex
-}
-
-func (m *Model[T]) LastSequence() uint64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.lseq
 }
 
 func (m *Model[T]) Evolve(event *Event) error {
@@ -143,17 +194,20 @@ func (m *Model[T]) Evolve(event *Event) error {
 		return ErrEvolverNotImplemented
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	lseq := m.seqs.GetLast(event.Entity)
+
 	// Already applied
-	if m.lseq >= event.sequence {
+	if lseq >= event.sequence {
 		return nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.sseq == 0 {
-		m.sseq = event.sequence
+	if m.seqs.GetStart(event.Entity) == 0 {
+		m.seqs.SetStart(event.Entity, event.sequence)
 	}
-	m.lseq = event.sequence
+	m.seqs.SetLast(event.Entity, event.sequence)
 
 	return m.e.Evolve(event)
 }
@@ -169,9 +223,22 @@ func (m *Model[T]) Decide(cmd *Command) ([]*Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(events) > 0 {
-		events[0].Expect = ExpectSequence(m.lseq)
+
+	entities := make(map[string]struct{})
+	for _, event := range events {
+		// Ignore if we've already seen this entity in this batch
+		// since we only need to set the expect sequence once.
+		if _, seen := entities[event.Entity]; seen {
+			continue
+		}
+
+		entities[event.Entity] = struct{}{}
+		// Either this is explicitly set or we set it to the last known sequence.
+		if event.Expect == nil {
+			event.Expect = ExpectSequence(m.seqs.GetLast(event.Entity))
+		}
 	}
+
 	return events, nil
 }
 
@@ -189,6 +256,8 @@ func NewModel[T any](t T) *Model[T] {
 	// Missing implementations will be caught at runtime when methods are called.
 	m.e, _ = any(t).(Evolver)
 	m.d, _ = any(t).(Decider)
+
+	m.seqs = newEntityMap()
 
 	return m
 }
