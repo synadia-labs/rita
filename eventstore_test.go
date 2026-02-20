@@ -553,6 +553,67 @@ func TestModelWatcher(t *testing.T) {
 	is.NoErr(err)
 }
 
+// batchOrderModel returns 3 OrderPlaced events for the same entity in one Decide call.
+type batchOrderModel struct {
+	Placed int
+}
+
+func (m *batchOrderModel) Decide(cmd *Command) ([]*Event, error) {
+	return []*Event{
+		{Entity: "store.1", Data: &OrderPlaced{}},
+		{Entity: "store.1", Data: &OrderPlaced{}},
+		{Entity: "store.1", Data: &OrderPlaced{}},
+	}, nil
+}
+
+func (m *batchOrderModel) Evolve(event *Event) error {
+	switch event.Data.(type) {
+	case *OrderPlaced:
+		m.Placed++
+	}
+	return nil
+}
+
+func TestDecideAndEvolveBatchSequences(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServer(t)
+	defer testutil.ShutdownNatsServer(srv)
+
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
+
+	tr, err := types.NewRegistry(registry)
+	is.NoErr(err)
+
+	mgr, err := New(nc, WithRegistry(tr))
+	is.NoErr(err)
+
+	ctx := context.Background()
+	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{
+		Name: "store",
+	})
+	is.NoErr(err)
+
+	state := &batchOrderModel{}
+	model := NewModel(state)
+
+	events, seq, err := es.DecideAndEvolve(ctx, model, &Command{
+		Data: &PlaceOrder{},
+	})
+	is.NoErr(err)
+	is.Equal(seq, uint64(3))
+	is.Equal(len(events), 3)
+
+	// Each event must have a distinct, incrementing sequence.
+	is.Equal(events[0].sequence, uint64(1))
+	is.Equal(events[1].sequence, uint64(2))
+	is.Equal(events[2].sequence, uint64(3))
+
+	// All 3 events must have been evolved into the state.
+	is.Equal(state.Placed, 3)
+}
+
 type mixedEntitiesModel struct{}
 
 func (m *mixedEntitiesModel) Decide(cmd *Command) ([]*Event, error) {
