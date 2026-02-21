@@ -68,8 +68,18 @@ type Event struct {
 	// sequence is the sequence number of the event within the stream. Read-only.
 	sequence uint64
 
-	// subject is the the subject the event is associated with. Read-only.
+	// subject is the subject the event is associated with. Read-only.
 	subject string
+}
+
+// Sequence returns the stream sequence number of the event.
+func (e *Event) Sequence() uint64 {
+	return e.sequence
+}
+
+// Subject returns the full NATS subject the event was published to.
+func (e *Event) Subject() string {
+	return e.subject
 }
 
 // Evolver is an interface that application-defined models can implement
