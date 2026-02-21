@@ -68,8 +68,18 @@ type Event struct {
 	// sequence is the sequence number of the event within the stream. Read-only.
 	sequence uint64
 
-	// subject is the the subject the event is associated with. Read-only.
+	// subject is the subject the event is associated with. Read-only.
 	subject string
+}
+
+// Sequence returns the stream sequence number of the event.
+func (e *Event) Sequence() uint64 {
+	return e.sequence
+}
+
+// Subject returns the full NATS subject the event was published to.
+func (e *Event) Subject() string {
+	return e.subject
 }
 
 // Evolver is an interface that application-defined models can implement
@@ -111,6 +121,7 @@ type Viewer[T any] interface {
 	View(func(T) error) error
 }
 
+// DeciderEvolver combines Decider and Evolver for use with DecideAndEvolve.
 type DeciderEvolver interface {
 	Decider
 	Evolver
@@ -152,19 +163,19 @@ func (em *entityMap) set(entity string, seq uint64, m map[string]map[string]uint
 	m[pattern][id] = seq
 }
 
-func (em *entityMap) GetStart(entity string) uint64 {
+func (em *entityMap) getStart(entity string) uint64 {
 	return em.get(entity, em.sseq)
 }
 
-func (em *entityMap) SetStart(entity string, seq uint64) {
+func (em *entityMap) setStart(entity string, seq uint64) {
 	em.set(entity, seq, em.sseq)
 }
 
-func (em *entityMap) GetLast(entity string) uint64 {
+func (em *entityMap) getLast(entity string) uint64 {
 	return em.get(entity, em.lseq)
 }
 
-func (em *entityMap) SetLast(entity string, seq uint64) {
+func (em *entityMap) setLast(entity string, seq uint64) {
 	em.set(entity, seq, em.lseq)
 }
 
@@ -197,17 +208,17 @@ func (m *Model[T]) Evolve(event *Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	lseq := m.seqs.GetLast(event.Entity)
+	lseq := m.seqs.getLast(event.Entity)
 
 	// Already applied
 	if lseq >= event.sequence {
 		return nil
 	}
 
-	if m.seqs.GetStart(event.Entity) == 0 {
-		m.seqs.SetStart(event.Entity, event.sequence)
+	if m.seqs.getStart(event.Entity) == 0 {
+		m.seqs.setStart(event.Entity, event.sequence)
 	}
-	m.seqs.SetLast(event.Entity, event.sequence)
+	m.seqs.setLast(event.Entity, event.sequence)
 
 	return m.e.Evolve(event)
 }
@@ -235,7 +246,7 @@ func (m *Model[T]) Decide(cmd *Command) ([]*Event, error) {
 		entities[event.Entity] = struct{}{}
 		// Either this is explicitly set or we set it to the last known sequence.
 		if event.Expect == nil {
-			event.Expect = ExpectSequence(m.seqs.GetLast(event.Entity))
+			event.Expect = ExpectSequence(m.seqs.getLast(event.Entity))
 		}
 	}
 

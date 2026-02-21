@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -37,6 +39,15 @@ var (
 	ErrNoEvents               = errors.New("rita: no events provided")
 	ErrEventStoreNameRequired = errors.New("rita: event store name is required")
 	ErrSubjectTooManyTokens   = errors.New("rita: subject can have at most three tokens")
+
+	// isSequenceConflict checks if the error is a JetStream wrong last sequence error.
+	isSequenceConflict = func(err error) bool {
+		var apiErr *jetstream.APIError
+		if errors.As(err, &apiErr) {
+			return apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
+		}
+		return false
+	}
 
 	// Entity regex: <entity-type>.<entity-id>. Note this is just a basic validation
 	// to ensure there are two tokens separated by a dot. Invalid characters will be
@@ -126,6 +137,8 @@ func WithFilters(filters ...string) EvolveOption {
 	})
 }
 
+// Watcher represents an active event subscription. Call Stop to
+// drain pending messages and stop the underlying consumer.
 type Watcher interface {
 	Stop()
 }
@@ -142,7 +155,7 @@ func (w *watcher) Stop() {
 	w.conCtx.Drain()
 }
 
-// EvolveOption is an option for the event store Evolve operation.
+// WatchOption is an option for the event store Watch operation.
 type WatchOption interface {
 	setOpt(*options) error
 }
@@ -316,11 +329,14 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 		return nil, fmt.Errorf("unpack: failed to parse event time: %w", err)
 	}
 
-	meta := make(map[string]string)
+	var meta map[string]string
 
 	headers := msg.Headers()
 	for h := range headers {
 		if strings.HasPrefix(h, eventMetaPrefixHdr) {
+			if meta == nil {
+				meta = make(map[string]string)
+			}
 			key := h[len(eventMetaPrefixHdr):]
 			meta[key] = headers.Get(h)
 		}
@@ -338,7 +354,7 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-// Decide is a convenience methods that combines a model's Decide invocation
+// Decide is a convenience method that combines a model's Decide invocation
 // followed by an Append. If either step fails, an error is returned.
 func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([]*Event, uint64, error) {
 	events, err := model.Decide(cmd)
@@ -354,8 +370,8 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([
 	return events, seq, nil
 }
 
-// DecideAndEvolve is a convenience methods that decides, store, and evolves a model
-// in one operation. If any step fails, an error is returned. Note, that is the evolve
+// DecideAndEvolve is a convenience method that decides, stores, and evolves a model
+// in one operation. If any step fails, an error is returned. Note, that if the evolve
 // step fails, the events have already been stored.
 func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
 	events, err := model.Decide(cmd)
@@ -379,41 +395,21 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	return events, seq, nil
 }
 
-// Evolve loads events and evolves a model of state. The sequence of the
-// last event that evolved the state is returned, including when an error
-// occurs. Note, the pattern can be several forms depending on the need.
-// The full template is `<entity-type>.<entity-id>.<event-type>`. If only
-// the entity type is provided, all events for all entities of that type
-// will be loaded. If the entity type and entity ID are provided, all events
-// for that specific entity will be loaded. If the full subject is provided,
-// only events of that specific type for that specific entity will be loaded.
-// Wildcards can be used as well.
-func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
-	var o options
-
-	// Configure opts.
-	for _, opt := range opts {
-		if err := opt.setOpt(&o); err != nil {
-			return 0, err
-		}
-	}
-
-	// Build subjects from patterns.
+// orderedConsumer builds an ordered consumer from the given options.
+func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream.Consumer, error) {
 	subjects := make([]string, len(o.filters))
 	for i, p := range o.filters {
 		pp, err := parsePattern(p)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		subjects[i] = s.subjectPrefix(pp)
 	}
 
-	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
 	sopts := jetstream.OrderedConsumerConfig{
 		FilterSubjects: subjects,
 	}
 
-	// Set starting point.
 	if o.afterSeq != nil {
 		if *o.afterSeq == 0 {
 			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
@@ -426,7 +422,27 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	}
 
 	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
-	con, err := s.js.OrderedConsumer(ctx, name, sopts)
+	return s.js.OrderedConsumer(ctx, name, sopts)
+}
+
+// Evolve loads events and evolves a model of state. The sequence of the
+// last event that evolved the state is returned, including when an error
+// occurs. Note, the pattern can be several forms depending on the need.
+// The full template is `<entity-type>.<entity-id>.<event-type>`. If only
+// the entity type is provided, all events for all entities of that type
+// will be loaded. If the entity type and entity ID are provided, all events
+// for that specific entity will be loaded. If the full subject is provided,
+// only events of that specific type for that specific entity will be loaded.
+// Wildcards can be used as well.
+func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
+	var o options
+	for _, opt := range opts {
+		if err := opt.setOpt(&o); err != nil {
+			return 0, err
+		}
+	}
+
+	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
 		return 0, err
 	}
@@ -435,7 +451,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// to the current known state.
 	info := con.CachedInfo()
 	defer func() {
-		_ = s.js.DeleteConsumer(ctx, name, info.Name)
+		_ = s.js.DeleteConsumer(ctx, fmt.Sprintf(eventStoreNameTmpl, s.name), info.Name)
 	}()
 
 	pending := info.NumPending
@@ -538,6 +554,9 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 	if len(msgs) == 1 {
 		ack, err := s.js.PublishMsg(ctx, msgs[0])
 		if err != nil {
+			if isSequenceConflict(err) {
+				return 0, ErrSequenceConflict
+			}
 			return 0, err
 		}
 		return ack.Sequence, nil
@@ -574,35 +593,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		}
 	}
 
-	// Build subjects from patterns.
-	subjects := make([]string, len(o.filters))
-	for i, p := range o.filters {
-		pp, err := parsePattern(p)
-		if err != nil {
-			return nil, err
-		}
-		subjects[i] = s.subjectPrefix(pp)
-	}
-
-	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
-	sopts := jetstream.OrderedConsumerConfig{
-		FilterSubjects: subjects,
-	}
-
-	// Set starting point.
-	if o.afterSeq != nil {
-		if *o.afterSeq == 0 {
-			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
-		} else {
-			sopts.OptStartSeq = *o.afterSeq + 1
-			sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-		}
-	} else {
-		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
-	}
-
-	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
-	con, err := s.js.OrderedConsumer(ctx, name, sopts)
+	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
 		return nil, err
 	}
@@ -612,16 +603,12 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	info := con.CachedInfo()
 
 	// Determine if we need to wait for catch-up.
-	var catchup bool
-	var pending uint64
+	var pending atomic.Int64
+	var closeOnce sync.Once
 	done := make(chan struct{})
-	if !o.noWait {
-		pending = info.NumPending
-		catchup = pending > 0
+	if !o.noWait && info.NumPending > 0 {
+		pending.Store(int64(info.NumPending))
 	} else {
-		catchup = false
-	}
-	if !catchup {
 		close(done)
 	}
 
@@ -637,12 +624,8 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 			return
 		}
 
-		if catchup {
-			pending--
-			if pending == 0 {
-				close(done)
-				catchup = false
-			}
+		if pending.Add(-1) == 0 {
+			closeOnce.Do(func() { close(done) })
 		}
 	})
 	if err != nil {
