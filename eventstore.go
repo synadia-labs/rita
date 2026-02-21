@@ -395,41 +395,21 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	return events, seq, nil
 }
 
-// Evolve loads events and evolves a model of state. The sequence of the
-// last event that evolved the state is returned, including when an error
-// occurs. Note, the pattern can be several forms depending on the need.
-// The full template is `<entity-type>.<entity-id>.<event-type>`. If only
-// the entity type is provided, all events for all entities of that type
-// will be loaded. If the entity type and entity ID are provided, all events
-// for that specific entity will be loaded. If the full subject is provided,
-// only events of that specific type for that specific entity will be loaded.
-// Wildcards can be used as well.
-func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
-	var o options
-
-	// Configure opts.
-	for _, opt := range opts {
-		if err := opt.setOpt(&o); err != nil {
-			return 0, err
-		}
-	}
-
-	// Build subjects from patterns.
+// orderedConsumer builds an ordered consumer from the given options.
+func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream.Consumer, error) {
 	subjects := make([]string, len(o.filters))
 	for i, p := range o.filters {
 		pp, err := parsePattern(p)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		subjects[i] = s.subjectPrefix(pp)
 	}
 
-	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
 	sopts := jetstream.OrderedConsumerConfig{
 		FilterSubjects: subjects,
 	}
 
-	// Set starting point.
 	if o.afterSeq != nil {
 		if *o.afterSeq == 0 {
 			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
@@ -442,7 +422,27 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	}
 
 	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
-	con, err := s.js.OrderedConsumer(ctx, name, sopts)
+	return s.js.OrderedConsumer(ctx, name, sopts)
+}
+
+// Evolve loads events and evolves a model of state. The sequence of the
+// last event that evolved the state is returned, including when an error
+// occurs. Note, the pattern can be several forms depending on the need.
+// The full template is `<entity-type>.<entity-id>.<event-type>`. If only
+// the entity type is provided, all events for all entities of that type
+// will be loaded. If the entity type and entity ID are provided, all events
+// for that specific entity will be loaded. If the full subject is provided,
+// only events of that specific type for that specific entity will be loaded.
+// Wildcards can be used as well.
+func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
+	var o options
+	for _, opt := range opts {
+		if err := opt.setOpt(&o); err != nil {
+			return 0, err
+		}
+	}
+
+	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
 		return 0, err
 	}
@@ -451,7 +451,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// to the current known state.
 	info := con.CachedInfo()
 	defer func() {
-		_ = s.js.DeleteConsumer(ctx, name, info.Name)
+		_ = s.js.DeleteConsumer(ctx, fmt.Sprintf(eventStoreNameTmpl, s.name), info.Name)
 	}()
 
 	pending := info.NumPending
@@ -593,35 +593,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		}
 	}
 
-	// Build subjects from patterns.
-	subjects := make([]string, len(o.filters))
-	for i, p := range o.filters {
-		pp, err := parsePattern(p)
-		if err != nil {
-			return nil, err
-		}
-		subjects[i] = s.subjectPrefix(pp)
-	}
-
-	// Ephemeral ordered consumer.. read as fast as possible with least overhead.
-	sopts := jetstream.OrderedConsumerConfig{
-		FilterSubjects: subjects,
-	}
-
-	// Set starting point.
-	if o.afterSeq != nil {
-		if *o.afterSeq == 0 {
-			sopts.DeliverPolicy = jetstream.DeliverAllPolicy
-		} else {
-			sopts.OptStartSeq = *o.afterSeq + 1
-			sopts.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-		}
-	} else {
-		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
-	}
-
-	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
-	con, err := s.js.OrderedConsumer(ctx, name, sopts)
+	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
 		return nil, err
 	}
