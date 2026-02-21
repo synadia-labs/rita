@@ -174,7 +174,7 @@ func (r *Registry) Marshal(v any) ([]byte, error) {
 
 	b, err := r.codec.Marshal(v)
 	if err != nil {
-		return b, fmt.Errorf("%T: marshal error: %w", v, err)
+		return nil, fmt.Errorf("%T: marshal error: %w", v, err)
 	}
 	return b, nil
 }
