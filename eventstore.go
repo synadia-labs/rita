@@ -538,6 +538,9 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 	if len(msgs) == 1 {
 		ack, err := s.js.PublishMsg(ctx, msgs[0])
 		if err != nil {
+			if strings.Contains(err.Error(), "wrong last sequence") {
+				return 0, ErrSequenceConflict
+			}
 			return 0, err
 		}
 		return ack.Sequence, nil
