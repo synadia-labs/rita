@@ -93,17 +93,22 @@ func (m *Manager) GetEventStore(ctx context.Context, name string) (*EventStore, 
 		return nil, ErrEventStoreNameRequired
 	}
 
-	e := &EventStore{
-		name: name,
-	}
-
 	sname := fmt.Sprintf(eventStoreNameTmpl, name)
 
-	// If the stream exists, extract the subject prefix, otherwise this
-	// will be done on create.
+	// Verify the stream exists.
 	_, err := m.js.Stream(ctx, sname)
 	if err != nil {
 		return nil, err
+	}
+
+	e := &EventStore{
+		name:   name,
+		nc:     m.nc,
+		js:     m.js,
+		id:     m.id,
+		clock:  m.clock,
+		types:  m.types,
+		logger: m.logger,
 	}
 
 	return e, nil
