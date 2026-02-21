@@ -3,7 +3,33 @@ package codec
 import (
 	"testing"
 	"time"
+
+	"github.com/synadia-labs/rita/testutil"
 )
+
+func TestMsgPackCodec(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	type T struct {
+		Name  string
+		Count int
+	}
+
+	v := &T{Name: "bar", Count: 7}
+
+	b, err := MsgPack.Marshal(v)
+	is.NoErr(err)
+
+	var out T
+	err = MsgPack.Unmarshal(b, &out)
+	is.NoErr(err)
+	is.Equal(out, *v)
+}
+
+func TestMsgPackCodec_Name(t *testing.T) {
+	is := testutil.NewIs(t)
+	is.Equal(MsgPack.Name(), "msgpack")
+}
 
 func BenchmarkMsgPackMarshal(b *testing.B) {
 	type T struct {

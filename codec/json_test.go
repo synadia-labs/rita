@@ -3,7 +3,41 @@ package codec
 import (
 	"testing"
 	"time"
+
+	"github.com/synadia-labs/rita/testutil"
 )
+
+func TestJSONCodec(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	type T struct {
+		Name  string
+		Count int
+	}
+
+	v := &T{Name: "foo", Count: 42}
+
+	b, err := JSON.Marshal(v)
+	is.NoErr(err)
+
+	var out T
+	err = JSON.Unmarshal(b, &out)
+	is.NoErr(err)
+	is.Equal(out, *v)
+}
+
+func TestJSONCodec_Name(t *testing.T) {
+	is := testutil.NewIs(t)
+	is.Equal(JSON.Name(), "json")
+}
+
+func TestJSONCodec_EmptyInput(t *testing.T) {
+	var out struct{}
+	err := JSON.Unmarshal([]byte{}, &out)
+	if err != nil {
+		t.Fatalf("expected nil error for empty input, got: %v", err)
+	}
+}
 
 func BenchmarkJSONMarshal(b *testing.B) {
 	type T struct {

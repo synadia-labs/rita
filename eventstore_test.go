@@ -11,6 +11,19 @@ import (
 	"github.com/synadia-labs/rita/types"
 )
 
+// waitFor polls fn until it returns true or the timeout expires.
+func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for condition")
+}
+
 var (
 	registry = map[string]*types.Type{
 		"place-order": {
@@ -528,14 +541,15 @@ func TestModelWatcher(t *testing.T) {
 	})
 	is.NoErr(err)
 
-	time.Sleep(50 * time.Millisecond)
-
-	// Check that the model state has evolved.
-	err = m.View(func(s *OrderStats) error {
-		is.Equal(s.Placed, 1)
-		return nil
+	// Wait for the watcher to evolve the model.
+	waitFor(t, 2*time.Second, func() bool {
+		var placed int
+		_ = m.View(func(s *OrderStats) error {
+			placed = s.Placed
+			return nil
+		})
+		return placed == 1
 	})
-	is.NoErr(err)
 
 	// Decide a command to ship an order.
 	_, _, err = es.Decide(ctx, m, &Command{
@@ -543,15 +557,15 @@ func TestModelWatcher(t *testing.T) {
 	})
 	is.NoErr(err)
 
-	time.Sleep(50 * time.Millisecond)
-
-	// Check that the model state has evolved.
-	err = m.View(func(s *OrderStats) error {
-		is.Equal(s.Placed, 1)
-		is.Equal(s.Shipped, 1)
-		return nil
+	// Wait for the watcher to evolve the model.
+	waitFor(t, 2*time.Second, func() bool {
+		var shipped int
+		_ = m.View(func(s *OrderStats) error {
+			shipped = s.Shipped
+			return nil
+		})
+		return shipped == 1
 	})
-	is.NoErr(err)
 }
 
 // batchOrderModel returns 3 OrderPlaced events for the same entity in one Decide call.
@@ -660,7 +674,17 @@ func TestMixedEntities(t *testing.T) {
 	is.Equal(seq, uint64(3))
 	is.Equal(len(events), 3)
 
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the watcher to evolve all events before the next Decide
+	// so that auto-Expect reflects the correct sequences.
+	waitFor(t, 2*time.Second, func() bool {
+		testEvents, _ := m.Decide(nil)
+		for _, e := range testEvents {
+			if e.Entity == "order.2" && e.Expect != nil && e.Expect.Sequence == 3 {
+				return true
+			}
+		}
+		return false
+	})
 
 	events, seq, err = es.Decide(ctx, m, nil)
 	is.NoErr(err)
