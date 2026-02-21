@@ -40,6 +40,15 @@ var (
 	ErrEventStoreNameRequired = errors.New("rita: event store name is required")
 	ErrSubjectTooManyTokens   = errors.New("rita: subject can have at most three tokens")
 
+	// isSequenceConflict checks if the error is a JetStream wrong last sequence error.
+	isSequenceConflict = func(err error) bool {
+		var apiErr *jetstream.APIError
+		if errors.As(err, &apiErr) {
+			return apiErr.ErrorCode == jetstream.JSErrCodeStreamWrongLastSequence
+		}
+		return false
+	}
+
 	// Entity regex: <entity-type>.<entity-id>. Note this is just a basic validation
 	// to ensure there are two tokens separated by a dot. Invalid characters will be
 	// caught by NATS server when publishing.
@@ -545,7 +554,7 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 	if len(msgs) == 1 {
 		ack, err := s.js.PublishMsg(ctx, msgs[0])
 		if err != nil {
-			if strings.Contains(err.Error(), "wrong last sequence") {
+			if isSequenceConflict(err) {
 				return 0, ErrSequenceConflict
 			}
 			return 0, err
