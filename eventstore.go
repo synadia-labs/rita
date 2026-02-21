@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -620,16 +622,12 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	info := con.CachedInfo()
 
 	// Determine if we need to wait for catch-up.
-	var catchup bool
-	var pending uint64
+	var pending atomic.Int64
+	var closeOnce sync.Once
 	done := make(chan struct{})
-	if !o.noWait {
-		pending = info.NumPending
-		catchup = pending > 0
+	if !o.noWait && info.NumPending > 0 {
+		pending.Store(int64(info.NumPending))
 	} else {
-		catchup = false
-	}
-	if !catchup {
 		close(done)
 	}
 
@@ -645,12 +643,8 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 			return
 		}
 
-		if catchup {
-			pending--
-			if pending == 0 {
-				close(done)
-				catchup = false
-			}
+		if pending.Add(-1) == 0 {
+			closeOnce.Do(func() { close(done) })
 		}
 	})
 	if err != nil {
