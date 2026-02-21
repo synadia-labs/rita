@@ -318,11 +318,14 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 		return nil, fmt.Errorf("unpack: failed to parse event time: %w", err)
 	}
 
-	meta := make(map[string]string)
+	var meta map[string]string
 
 	headers := msg.Headers()
 	for h := range headers {
 		if strings.HasPrefix(h, eventMetaPrefixHdr) {
+			if meta == nil {
+				meta = make(map[string]string)
+			}
 			key := h[len(eventMetaPrefixHdr):]
 			meta[key] = headers.Get(h)
 		}
