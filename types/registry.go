@@ -114,12 +114,12 @@ func (r *Registry) validate(name string, typ *Type) error {
 	// Ensure [de]serialization works in the base case.
 	b, err := r.codec.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("%w: %s: failed to marshal with codec: %w", ErrTypeNotValid, name, err)
+		return fmt.Errorf("%w: %s: failed to marshal with codec: %v", ErrTypeNotValid, name, err)
 	}
 
 	err = r.codec.Unmarshal(b, v)
 	if err != nil {
-		return fmt.Errorf("%w: %s: failed to unmarshal with codec: %w", ErrTypeNotValid, name, err)
+		return fmt.Errorf("%w: %s: failed to unmarshal with codec: %v", ErrTypeNotValid, name, err)
 	}
 
 	return nil
