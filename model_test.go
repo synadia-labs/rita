@@ -18,7 +18,7 @@ func (p *Profile) Decide(cmd *Command) ([]*Event, error) {
 	return nil, nil
 }
 
-func BenchmarkModel__Decide(b *testing.B) {
+func BenchmarkModel_Decide(b *testing.B) {
 	p := &Profile{}
 	m := NewModel(p)
 	c := &Command{}
@@ -30,7 +30,7 @@ func BenchmarkModel__Decide(b *testing.B) {
 	}
 }
 
-func BenchmarkModel__Evolve(b *testing.B) {
+func BenchmarkModel_Evolve(b *testing.B) {
 	p := &Profile{}
 	m := NewModel(p)
 	e := &Event{}
@@ -42,7 +42,7 @@ func BenchmarkModel__Evolve(b *testing.B) {
 	}
 }
 
-func BenchmarkModel__View(b *testing.B) {
+func BenchmarkModel_View(b *testing.B) {
 	p := &Profile{}
 	m := NewModel(p)
 	fn := func(p *Profile) error { return nil }
