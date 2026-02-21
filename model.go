@@ -111,6 +111,7 @@ type Viewer[T any] interface {
 	View(func(T) error) error
 }
 
+// DeciderEvolver combines Decider and Evolver for use with DecideAndEvolve.
 type DeciderEvolver interface {
 	Decider
 	Evolver

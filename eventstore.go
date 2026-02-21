@@ -126,6 +126,8 @@ func WithFilters(filters ...string) EvolveOption {
 	})
 }
 
+// Watcher represents an active event subscription. Call Stop to
+// drain pending messages and stop the underlying consumer.
 type Watcher interface {
 	Stop()
 }
@@ -142,7 +144,7 @@ func (w *watcher) Stop() {
 	w.conCtx.Drain()
 }
 
-// EvolveOption is an option for the event store Evolve operation.
+// WatchOption is an option for the event store Watch operation.
 type WatchOption interface {
 	setOpt(*options) error
 }
@@ -338,7 +340,7 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 	}, nil
 }
 
-// Decide is a convenience methods that combines a model's Decide invocation
+// Decide is a convenience method that combines a model's Decide invocation
 // followed by an Append. If either step fails, an error is returned.
 func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([]*Event, uint64, error) {
 	events, err := model.Decide(cmd)
@@ -354,8 +356,8 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([
 	return events, seq, nil
 }
 
-// DecideAndEvolve is a convenience methods that decides, store, and evolves a model
-// in one operation. If any step fails, an error is returned. Note, that is the evolve
+// DecideAndEvolve is a convenience method that decides, stores, and evolves a model
+// in one operation. If any step fails, an error is returned. Note, that if the evolve
 // step fails, the events have already been stored.
 func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
 	events, err := model.Decide(cmd)
