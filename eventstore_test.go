@@ -389,12 +389,13 @@ func TestEventStoreWithRegistry(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
 			ctx := context.Background()
+			storeName := "store-" + test.Name
 			es, err := m.CreateEventStore(ctx, EventStoreConfig{
-				Name: "store",
+				Name: storeName,
 			})
 			is.NoErr(err)
 			defer func() {
-				_ = m.DeleteEventStore(ctx, "store")
+				_ = m.DeleteEventStore(ctx, storeName)
 			}()
 
 			test.Run(t, es)
