@@ -15,11 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server"
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 
 	"github.com/synadia-labs/rita"
+	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
 )
 
@@ -41,15 +40,13 @@ func main() {
 }
 
 func run() error {
-	srv, dir, err := startEmbeddedNATS()
+	dir, err := os.MkdirTemp("", "rita-example-*")
 	if err != nil {
-		return fmt.Errorf("start nats: %w", err)
+		return fmt.Errorf("temp dir: %w", err)
 	}
-	defer func() {
-		srv.Shutdown()
-		srv.WaitForShutdown()
-		_ = os.RemoveAll(dir)
-	}()
+	defer func() { _ = os.RemoveAll(dir) }()
+	srv := testutil.NewNatsServerWithDir(dir)
+	defer testutil.ShutdownNatsServer(srv)
 
 	nc, err := nats.Connect(srv.ClientURL())
 	if err != nil {
@@ -186,16 +183,4 @@ func run() error {
 	}
 
 	return nil
-}
-
-func startEmbeddedNATS() (*server.Server, string, error) {
-	dir, err := os.MkdirTemp("", "rita-example-*")
-	if err != nil {
-		return nil, "", err
-	}
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = dir
-	return natsserver.RunServer(&opts), dir, nil
 }

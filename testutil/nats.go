@@ -7,12 +7,16 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/test"
 )
 
-func NewNatsServer(tb testing.TB) *server.Server {
+func NewNatsServerWithDir(dir string) *server.Server {
 	opts := natsserver.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
-	opts.StoreDir = tb.TempDir()
+	opts.StoreDir = dir
 	return natsserver.RunServer(&opts)
+}
+
+func NewNatsServer(tb testing.TB) *server.Server {
+	return NewNatsServerWithDir(tb.TempDir())
 }
 
 func ShutdownNatsServer(s *server.Server) {
