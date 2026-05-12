@@ -389,12 +389,16 @@ func TestEventStoreWithRegistry(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
 			ctx := context.Background()
+			// Use a per-subtest stream name so the JetStream filestore cleanup
+			// from one subtest's deferred delete can't race the next subtest's
+			// create on slow runners.
+			storeName := test.Name
 			es, err := m.CreateEventStore(ctx, EventStoreConfig{
-				Name: "store",
+				Name: storeName,
 			})
 			is.NoErr(err)
 			defer func() {
-				_ = m.DeleteEventStore(ctx, "store")
+				_ = m.DeleteEventStore(ctx, storeName)
 			}()
 
 			test.Run(t, es)
