@@ -1,0 +1,28 @@
+name: Claude Code
+
+# GITHUB_TOKEN needs only contents:read — required by claude-code-action for
+# restoring trusted config files from the base branch.
+permissions:
+  contents: read
+  actions: read
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  claude:
+    uses: synadia-io/ai-workflows/.github/workflows/claude.yml@360ae3f93dacef5ff2832304852358889f0fda1c # v2.2.0
+    with:
+      gh_app_id: ${{ vars.CLAUDE_GH_APP_ID }}
+      review_focus: |
+        Additionally focus on:
+        - Event-sourcing correctness: command/event handler invariants, idempotency, and state evolution
+        - NATS JetStream usage: stream/consumer configuration, message acks, and durability guarantees
+        - Public API stability: breaking changes to exported types and functions in this pre-1.0 library
+    secrets:
+      claude_oauth_token: ${{ secrets.CLAUDE_OAUTH_TOKEN }}
+      gh_app_private_key: ${{ secrets.CLAUDE_GH_APP_PRIVATE_KEY }}
