@@ -12,8 +12,10 @@ import (
 
 var (
 	ErrUnprocessable          = errors.New("rita: unprocessable event")
-	ErrReactorDurableRequired = errors.New("rita: reactor durable name is required")
+	ErrReactorNameRequired    = errors.New("rita: reactor name is required")
 	ErrReactorHandlerRequired = errors.New("rita: reactor handler is required")
+	ErrReactorNotFound        = errors.New("rita: reactor not found")
+	ErrReactorExists          = errors.New("rita: reactor already exists with a different config")
 )
 
 // ReactorHandler processes a single event for side effects.
@@ -27,74 +29,229 @@ type ReactorHandler func(ctx context.Context, ev *Event) error
 // Reactor is an active durable subscription. Stop drains in-flight messages
 // within ctx's deadline; the durable persists in JetStream, so a subsequent
 // React call with the same name resumes from the stored position.
+//
+// Stop does not delete the durable consumer. To remove the underlying
+// JetStream consumer, call (*EventStore).DeleteReactor. If DeleteReactor is
+// called while this Reactor is consuming, the consume loop receives a
+// terminal error logged via the EventStore's logger; the caller still needs
+// to invoke Stop to release runtime resources.
 type Reactor interface {
 	Stop(ctx context.Context) error
 }
 
-type reactOptions struct {
-	maxAckPending int
-	maxDeliver    int
-	backOff       []time.Duration
-	ackWait       time.Duration
-	filters       []string
+// ReactorConfig describes a durable consumer used to drive a reactor.
+//
+// Zero-valued options are replaced with Rita defaults on every Create/Update.
+//   - MaxAckPending: 1   (serial delivery; protects ordering for side effects)
+//   - MaxDeliver:   -1   (unlimited)
+//   - AckWait:      30s
+type ReactorConfig struct {
+	Name          string
+	Description   string
+	Metadata      map[string]string
+	Filters       []string
+	MaxAckPending int
+	MaxDeliver    int
+	AckWait       time.Duration
+	BackOff       []time.Duration
 }
 
-func defaultReactOptions() reactOptions {
-	return reactOptions{
-		// maxAckPending=1 enforces serial delivery per durable so side-effect
-		// handlers observe a strict event order. Override with WithMaxAckPending
-		// when concurrent delivery is acceptable.
-		maxAckPending: 1,
-		maxDeliver:    -1,
-		ackWait:       30 * time.Second,
+// ReactorInfo is a point-in-time snapshot of a reactor durable, mirrored from
+// JetStream's ConsumerInfo.
+type ReactorInfo struct {
+	Name           string
+	Config         ReactorConfig
+	NumPending     uint64
+	NumAckPending  int
+	NumRedelivered int
+	NumWaiting     int
+	Created        time.Time
+}
+
+func (c *ReactorConfig) applyDefaults() {
+	if c.MaxAckPending == 0 {
+		c.MaxAckPending = 1
+	}
+	if c.MaxDeliver == 0 {
+		c.MaxDeliver = -1
+	}
+	if c.AckWait == 0 {
+		c.AckWait = 30 * time.Second
 	}
 }
 
-// ReactOption configures a React invocation.
-type ReactOption interface {
-	setReactOpt(o *reactOptions) error
+func (s *EventStore) reactorConsumerConfig(cfg ReactorConfig) (jetstream.ConsumerConfig, error) {
+	subjects, err := s.filtersToSubjects(cfg.Filters)
+	if err != nil {
+		return jetstream.ConsumerConfig{}, err
+	}
+	return jetstream.ConsumerConfig{
+		Durable:        cfg.Name,
+		Description:    cfg.Description,
+		Metadata:       cfg.Metadata,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		MaxAckPending:  cfg.MaxAckPending,
+		MaxDeliver:     cfg.MaxDeliver,
+		BackOff:        cfg.BackOff,
+		AckWait:        cfg.AckWait,
+		FilterSubjects: subjects,
+	}, nil
 }
 
-type reactOptFn func(o *reactOptions) error
-
-func (f reactOptFn) setReactOpt(o *reactOptions) error {
-	return f(o)
+func (s *EventStore) reactorConfigFromConsumer(cc jetstream.ConsumerConfig) ReactorConfig {
+	return ReactorConfig{
+		Name:          cc.Durable,
+		Description:   cc.Description,
+		Metadata:      cc.Metadata,
+		Filters:       s.subjectsToFilters(cc.FilterSubjects),
+		MaxAckPending: cc.MaxAckPending,
+		MaxDeliver:    cc.MaxDeliver,
+		AckWait:       cc.AckWait,
+		BackOff:       cc.BackOff,
+	}
 }
 
-// WithMaxAckPending sets the maximum number of unacknowledged messages
-// in flight cluster-wide for this reactor. Defaults to 1.
-func WithMaxAckPending(n int) ReactOption {
-	return reactOptFn(func(o *reactOptions) error {
-		o.maxAckPending = n
-		return nil
-	})
+// CreateReactor provisions a durable consumer for the reactor. Idempotent on
+// matching config: if a durable with this name already exists and its config
+// matches, the call succeeds silently. If the config differs, returns ErrReactorExists.
+func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) error {
+	if cfg.Name == "" {
+		return ErrReactorNameRequired
+	}
+	cfg.applyDefaults()
+	cc, err := s.reactorConsumerConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := s.js.CreateConsumer(ctx, s.streamName(), cc); err != nil {
+		if errors.Is(err, jetstream.ErrConsumerExists) {
+			return fmt.Errorf("%w: %w", ErrReactorExists, err)
+		}
+		return fmt.Errorf("rita: create reactor: %w", err)
+	}
+	return nil
 }
 
-// WithMaxDeliver sets the maximum number of delivery attempts before
-// JetStream stops redelivering. Defaults to -1 (unlimited).
-func WithMaxDeliver(n int) ReactOption {
-	return reactOptFn(func(o *reactOptions) error {
-		o.maxDeliver = n
-		return nil
-	})
+// UpdateReactor replaces the configuration of an existing reactor durable.
+//
+// Replace semantics. The supplied ReactorConfig is the complete desired state,
+// not a patch. To change one field, call GetReactor, mutate the returned
+// config, then call UpdateReactor:
+//
+//	info, err := es.GetReactor(ctx, "shipping-notifier")
+//	if err != nil { return err }
+//	cfg := info.Config
+//	cfg.AckWait = 10 * time.Second
+//	if err := es.UpdateReactor(ctx, cfg); err != nil { return err }
+//
+// Rita's defaults (MaxAckPending=1, MaxDeliver=-1, AckWait=30s) are applied
+// at the boundary on every call, so an empty MaxAckPending does not silently
+// flip the durable to the JetStream server default of 1000. Filter and
+// BackOff slices are taken at face value: nil/empty means "no filters"/"no backoff".
+//
+// Returns ErrReactorNotFound if no durable with this name exists.
+func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) error {
+	if cfg.Name == "" {
+		return ErrReactorNameRequired
+	}
+	cfg.applyDefaults()
+	cc, err := s.reactorConsumerConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := s.js.UpdateConsumer(ctx, s.streamName(), cc); err != nil {
+		if errors.Is(err, jetstream.ErrConsumerDoesNotExist) || errors.Is(err, jetstream.ErrConsumerNotFound) {
+			return fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+		}
+		return fmt.Errorf("rita: update reactor: %w", err)
+	}
+	return nil
 }
 
-// WithBackOff sets a per-attempt redelivery delay schedule.
-func WithBackOff(durs ...time.Duration) ReactOption {
-	return reactOptFn(func(o *reactOptions) error {
-		o.backOff = durs
-		return nil
-	})
+// CreateOrUpdateReactor provisions or updates a reactor. Use this for declarative service-startup hooks where
+// idempotent provisioning is desired regardless of prior config.
+func (s *EventStore) CreateOrUpdateReactor(ctx context.Context, cfg ReactorConfig) error {
+	if cfg.Name == "" {
+		return ErrReactorNameRequired
+	}
+	cfg.applyDefaults()
+	cc, err := s.reactorConsumerConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := s.js.CreateOrUpdateConsumer(ctx, s.streamName(), cc); err != nil {
+		return fmt.Errorf("rita: create-or-update reactor: %w", err)
+	}
+	return nil
 }
 
-// WithAckWait sets the message acknowledgement deadline. Defaults to 30s.
-// NOTE: changing AckWait on a redeploy updates the existing durable's
-// configuration via CreateOrUpdateConsumer.
-func WithAckWait(d time.Duration) ReactOption {
-	return reactOptFn(func(o *reactOptions) error {
-		o.ackWait = d
-		return nil
-	})
+// DeleteReactor removes the JetStream consumer backing this reactor.
+//
+// If a Reactor instance is actively consuming when this is called, the
+// Consume loop will receive a terminal error from JetStream - that error is
+// logged via the EventStore's logger. The caller is still responsible for calling
+// (Reactor).Stop to release the runtime handle.
+//
+// Returns ErrReactorNotFound if no reactor with this name exists.
+func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
+	if name == "" {
+		return ErrReactorNameRequired
+	}
+	if err := s.js.DeleteConsumer(ctx, s.streamName(), name); err != nil {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
+			return fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+		}
+		return fmt.Errorf("rita: delete reactor: %w", err)
+	}
+	return nil
+}
+
+// GetReactor returns a point-in-time snapshot of the reactor durable.
+//
+// Returns ErrReactorNotFound if no durable with this name exists.
+func (s *EventStore) GetReactor(ctx context.Context, name string) (*ReactorInfo, error) {
+	if name == "" {
+		return nil, ErrReactorNameRequired
+	}
+	cons, err := s.js.Consumer(ctx, s.streamName(), name)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			return nil, fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+		}
+		return nil, fmt.Errorf("rita: get reactor: %w", err)
+	}
+	return s.reactorInfoFromJS(cons.CachedInfo()), nil
+}
+
+// ListReactors returns every consumer on the stream backing this EventStore,
+// including consumers created outside Rita. The result is not filtered by
+// any Rita-specific marker - what's on the stream is what you get.
+func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
+	stream, err := s.js.Stream(ctx, s.streamName())
+	if err != nil {
+		return nil, fmt.Errorf("rita: list reactors: %w", err)
+	}
+	lister := stream.ListConsumers(ctx)
+	var out []*ReactorInfo
+	for info := range lister.Info() {
+		out = append(out, s.reactorInfoFromJS(info))
+	}
+	if err := lister.Err(); err != nil {
+		return nil, fmt.Errorf("rita: list reactors: %w", err)
+	}
+	return out, nil
+}
+
+func (s *EventStore) reactorInfoFromJS(info *jetstream.ConsumerInfo) *ReactorInfo {
+	return &ReactorInfo{
+		Name:           info.Name,
+		Config:         s.reactorConfigFromConsumer(info.Config),
+		NumPending:     info.NumPending,
+		NumAckPending:  info.NumAckPending,
+		NumRedelivered: info.NumRedelivered,
+		NumWaiting:     info.NumWaiting,
+		Created:        info.Created,
+	}
 }
 
 type reactor struct {
@@ -112,55 +269,42 @@ type reactor struct {
 	once          sync.Once
 }
 
-// React provisions or resumes a durable consumer keyed on the given durable
-// name and starts dispatching events to handler.
-func (s *EventStore) React(ctx context.Context, durable string, handler ReactorHandler, opts ...ReactOption) (Reactor, error) {
-	if durable == "" {
-		return nil, ErrReactorDurableRequired
+// React attaches a handler to an existing reactor durable and starts
+// dispatching events.
+//
+// The durable must already exist (via CreateReactor or CreateOrUpdateReactor);
+// React does not create or modify the consumer. Returns ErrReactorNotFound
+// if no durable with this name exists on the EventStore's stream.
+func (s *EventStore) React(ctx context.Context, name string, handler ReactorHandler) (Reactor, error) {
+	if name == "" {
+		return nil, ErrReactorNameRequired
 	}
 	if handler == nil {
 		return nil, ErrReactorHandlerRequired
 	}
 
-	o := defaultReactOptions()
-	for _, opt := range opts {
-		if err := opt.setReactOpt(&o); err != nil {
-			return nil, err
+	cons, err := s.js.Consumer(ctx, s.streamName(), name)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+			return nil, fmt.Errorf("%w: %w", ErrReactorNotFound, err)
 		}
-	}
-
-	subjects, err := s.filtersToSubjects(o.filters)
-	if err != nil {
-		return nil, err
-	}
-
-	cfg := jetstream.ConsumerConfig{
-		Durable:        durable,
-		AckPolicy:      jetstream.AckExplicitPolicy,
-		MaxAckPending:  o.maxAckPending,
-		MaxDeliver:     o.maxDeliver,
-		BackOff:        o.backOff,
-		AckWait:        o.ackWait,
-		FilterSubjects: subjects,
-	}
-
-	cons, err := s.js.CreateOrUpdateConsumer(ctx, s.streamName(), cfg)
-	if err != nil {
-		return nil, fmt.Errorf("rita: create reactor consumer: %w", err)
+		return nil, fmt.Errorf("rita: lookup reactor consumer: %w", err)
 	}
 
 	hctx, cancelHandler := context.WithCancel(context.Background())
 	r := &reactor{
 		es:            s,
-		durable:       durable,
+		durable:       name,
 		handler:       handler,
-		backOff:       o.backOff,
+		backOff:       cons.CachedInfo().Config.BackOff,
 		handlerCtx:    hctx,
 		cancelHandler: cancelHandler,
 		stopped:       make(chan struct{}),
 	}
 
-	cc, err := cons.Consume(r.dispatch)
+	cc, err := cons.Consume(r.dispatch, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, cerr error) {
+		s.logger.Error("reactor consume error", "durable", name, "error", cerr)
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("rita: start reactor consume: %w", err)
 	}

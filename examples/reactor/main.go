@@ -94,9 +94,14 @@ func run() error {
 		return nil
 	}
 
-	r, err := es.React(ctx, "shipping-notifier", handler,
-		rita.WithFilters("*.*.order-shipped"),
-	)
+	if err := es.CreateOrUpdateReactor(ctx, rita.ReactorConfig{
+		Name:    "shipping-notifier",
+		Filters: []string{"*.*.order-shipped"},
+	}); err != nil {
+		return fmt.Errorf("create reactor: %w", err)
+	}
+
+	r, err := es.React(ctx, "shipping-notifier", handler)
 	if err != nil {
 		return fmt.Errorf("react: %w", err)
 	}

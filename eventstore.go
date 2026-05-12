@@ -100,6 +100,23 @@ func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
 	return subjects, nil
 }
 
+// subjectsToFilters strips this store's subject prefix from a list of
+// fully-qualified JetStream subjects, returning the original filter patterns.
+// Subjects that don't carry the prefix are surfaced verbatim (e.g. consumers
+// created outside Rita).
+func (s *EventStore) subjectsToFilters(subjects []string) []string {
+	prefix := s.subjectPrefix("")
+	filters := make([]string, 0, len(subjects))
+	for _, fs := range subjects {
+		if rest, ok := strings.CutPrefix(fs, prefix); ok {
+			filters = append(filters, rest)
+		} else {
+			filters = append(filters, fs)
+		}
+	}
+	return filters
+}
+
 type options struct {
 	filters  []string
 	afterSeq *uint64
@@ -144,12 +161,11 @@ func WithStopSequence(seq uint64) EvolveOption {
 	})
 }
 
-// FilterOption is an option accepted by both Evolve/Watch and React. It is the
-// return type of WithFilters so callers can store or pass the result without
-// committing to a concrete implementation.
+// FilterOption is the return type of WithFilters; it satisfies the option
+// interfaces accepted by Evolve and Watch. Filter knobs for reactors live on
+// ReactorConfig instead.
 type FilterOption interface {
 	EvolveOption
-	ReactOption
 }
 
 type filtersOption struct {
@@ -161,15 +177,11 @@ func (f filtersOption) setOpt(o *options) error {
 	return nil
 }
 
-func (f filtersOption) setReactOpt(o *reactOptions) error {
-	o.filters = f.filters
-	return nil
-}
-
-// WithFilters specifies the subject filter to use when evolving state, watching,
-// or reacting. The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
-// or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well at any token position.
-// This can be passed in `Evolve`, `Watch`, and `React`.
+// WithFilters specifies the subject filter to use when evolving state or
+// watching. The filter can be in the form of `<entity-type>`,
+// `<entity-type>.<entity-id>`, or `<entity-type>.<entity-id>.<event-type>`.
+// Wildcards can be used as well at any token position. For reactors, set
+// filters on ReactorConfig.Filters at Create/Update time.
 func WithFilters(filters ...string) FilterOption {
 	return filtersOption{filters: filters}
 }
