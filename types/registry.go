@@ -102,7 +102,7 @@ func (r *Registry) validate(name string, typ *Type) error {
 	rt := reflect.TypeOf(v)
 
 	// Ensure the initialize type is a pointer so that deserialization works.
-	if rt.Kind() != reflect.Ptr {
+	if rt.Kind() != reflect.Pointer {
 		return fmt.Errorf("%w: %s: init func must return a pointer value", ErrTypeNotValid, name)
 	}
 
