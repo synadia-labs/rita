@@ -458,12 +458,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// to the current known state.
 	info := con.CachedInfo()
 	defer func() {
-		// Detach from ctx so the consumer is still deleted when the caller
-		// cancelled — otherwise the ephemeral consumer is leaked on the server
-		// until JetStream reaps it.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_ = s.js.DeleteConsumer(cleanupCtx, fmt.Sprintf(eventStoreNameTmpl, s.name), info.Name)
+		_ = s.js.DeleteConsumer(ctx, fmt.Sprintf(eventStoreNameTmpl, s.name), info.Name)
 	}()
 
 	pending := info.NumPending
