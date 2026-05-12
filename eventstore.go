@@ -147,11 +147,15 @@ type watcher struct {
 	model  Evolver
 	conCtx jetstream.ConsumeContext
 	con    jetstream.Consumer
+	cancel context.CancelFunc
 
 	opts *options
 }
 
 func (w *watcher) Stop() {
+	// Cancel first so any in-flight Evolve call observes the shutdown; then
+	// drain remaining buffered messages.
+	w.cancel()
 	w.conCtx.Drain()
 }
 
@@ -357,7 +361,7 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 // Decide is a convenience method that combines a model's Decide invocation
 // followed by an Append. If either step fails, an error is returned.
 func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([]*Event, uint64, error) {
-	events, err := model.Decide(cmd)
+	events, err := model.Decide(ctx, cmd)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -372,9 +376,12 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([
 
 // DecideAndEvolve is a convenience method that decides, stores, and evolves a model
 // in one operation. If any step fails, an error is returned. Note, that if the evolve
-// step fails, the events have already been stored.
+// step fails — including via ctx cancellation between events — the events have
+// already been stored, and the in-memory model is advanced only up to the event
+// prior to the failure. Recovery is to call Evolve with WithAfterSequence to
+// replay the remaining events.
 func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
-	events, err := model.Decide(cmd)
+	events, err := model.Decide(ctx, cmd)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -387,7 +394,7 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	for i, ev := range events {
 		ev.sequence = seq - uint64(len(events)) + uint64(i) + 1
 
-		if err := model.Evolve(ev); err != nil {
+		if err := model.Evolve(ctx, ev); err != nil {
 			return events, seq, err
 		}
 	}
@@ -466,22 +473,31 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	}
 	defer msgCtx.Stop()
 
+	// msgCtx.Next() does not observe ctx; unblock it when the caller cancels.
+	stopOnCancel := context.AfterFunc(ctx, func() { msgCtx.Stop() })
+	defer stopOnCancel()
+
 	var lastSeq uint64
 	var count uint64
 	for {
 		// Check if context has been cancelled
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return lastSeq, err
 		}
 
 		msg, err := msgCtx.Next()
 		if err != nil {
-			return 0, err
+			// A cancelled ctx surfaces here as ErrMsgIteratorClosed via the
+			// AfterFunc above; report it as cancellation so callers can match.
+			if cerr := ctx.Err(); cerr != nil {
+				return lastSeq, cerr
+			}
+			return lastSeq, err
 		}
 
 		event, err := s.unpackEvent(msg)
 		if err != nil {
-			return 0, err
+			return lastSeq, err
 		}
 
 		// If up to sequence is set, break if the event sequence is greater than the up to sequence.
@@ -490,7 +506,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 			break
 		}
 
-		if err := model.Evolve(event); err != nil {
+		if err := model.Evolve(ctx, event); err != nil {
 			return lastSeq, err
 		}
 		lastSeq = event.sequence
@@ -598,6 +614,12 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		return nil, err
 	}
 
+	// Derive a watcher-scoped context from the caller's. The caller's ctx
+	// governs setup only; the watcher's lifetime is governed by Stop(). Without
+	// WithoutCancel, a request-scoped ctx cancelled after Watch returns would
+	// silently feed cancelled contexts to every subsequent model.Evolve call.
+	wctx, wcancel := context.WithCancel(context.WithoutCancel(ctx))
+
 	// The number of messages to consume until we are caught up
 	// to the current known state.
 	info := con.CachedInfo()
@@ -613,31 +635,45 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	}
 
 	conCtx, err := con.Consume(func(m jetstream.Msg) {
+		// Always decrement, even on unpack/evolve failure, so a single error
+		// during catch-up cannot wedge the waiter below. closeOnce ensures we
+		// only signal once even when pending crosses zero post-catch-up.
+		defer func() {
+			if pending.Add(-1) == 0 {
+				closeOnce.Do(func() { close(done) })
+			}
+		}()
+
 		ev, err := s.unpackEvent(m)
 		if err != nil {
 			o.errHandler(fmt.Errorf("failed to unpack event: %w", err), nil, m)
 			return
 		}
 
-		if err := model.Evolve(ev); err != nil {
+		if err := model.Evolve(wctx, ev); err != nil {
 			o.errHandler(fmt.Errorf("failed to evolve event: %w", err), ev, m)
 			return
 		}
-
-		if pending.Add(-1) == 0 {
-			closeOnce.Do(func() { close(done) })
-		}
 	})
 	if err != nil {
+		wcancel()
 		return nil, err
 	}
 
-	<-done
+	// Wait for catch-up, but let the caller abort via ctx.
+	select {
+	case <-done:
+	case <-ctx.Done():
+		wcancel()
+		conCtx.Stop()
+		return nil, ctx.Err()
+	}
 
 	w := &watcher{
 		model:  model,
 		con:    con,
 		conCtx: conCtx,
+		cancel: wcancel,
 		opts:   &o,
 	}
 

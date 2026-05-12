@@ -1,6 +1,7 @@
 package rita
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -85,7 +86,7 @@ func (e *Event) Subject() string {
 // Evolver is an interface that application-defined models can implement
 // to evolve their state based on events.
 type Evolver interface {
-	Evolve(*Event) error
+	Evolve(context.Context, *Event) error
 }
 
 // Command is a wrapper for application-defined commands.
@@ -113,12 +114,12 @@ type Command struct {
 // to decide on state transitions. Zero or more events can be returned
 // that represents the state transitions to be stored.
 type Decider interface {
-	Decide(*Command) ([]*Event, error)
+	Decide(context.Context, *Command) ([]*Event, error)
 }
 
 // Viewer represents a read-only view of the state of an entity.
 type Viewer[T any] interface {
-	View(func(T) error) error
+	View(context.Context, func(T) error) error
 }
 
 // DeciderEvolver combines Decider and Evolver for use with DecideAndEvolve.
@@ -200,7 +201,7 @@ type Model[T any] struct {
 	mu sync.RWMutex
 }
 
-func (m *Model[T]) Evolve(event *Event) error {
+func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 	if m.e == nil {
 		return ErrEvolverNotImplemented
 	}
@@ -220,17 +221,17 @@ func (m *Model[T]) Evolve(event *Event) error {
 	}
 	m.seqs.setLast(event.Entity, event.sequence)
 
-	return m.e.Evolve(event)
+	return m.e.Evolve(ctx, event)
 }
 
-func (m *Model[T]) Decide(cmd *Command) ([]*Event, error) {
+func (m *Model[T]) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 	if m.d == nil {
 		return nil, ErrDeciderNotImplemented
 	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	events, err := m.d.Decide(cmd)
+	events, err := m.d.Decide(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +254,7 @@ func (m *Model[T]) Decide(cmd *Command) ([]*Event, error) {
 	return events, nil
 }
 
-func (m *Model[T]) View(fn func(T) error) error {
+func (m *Model[T]) View(ctx context.Context, fn func(T) error) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return fn(m.t)
