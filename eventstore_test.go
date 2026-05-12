@@ -67,7 +67,7 @@ type OrderStats struct {
 	Shipped  int
 }
 
-func (s *OrderStats) Decide(cmd *Command) ([]*Event, error) {
+func (s *OrderStats) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 	switch cmd.Data.(type) {
 	case *PlaceOrder:
 		return []*Event{
@@ -87,7 +87,7 @@ func (s *OrderStats) Decide(cmd *Command) ([]*Event, error) {
 	return nil, nil
 }
 
-func (s *OrderStats) Evolve(event *Event) error {
+func (s *OrderStats) Evolve(ctx context.Context, event *Event) error {
 	switch event.Data.(type) {
 	case *OrderPlaced:
 		s.Placed++
@@ -101,7 +101,7 @@ func (s *OrderStats) Evolve(event *Event) error {
 
 type eventSlice []*Event
 
-func (es *eventSlice) Evolve(event *Event) error {
+func (es *eventSlice) Evolve(ctx context.Context, event *Event) error {
 	*es = append(*es, event)
 	return nil
 }
@@ -544,7 +544,7 @@ func TestModelWatcher(t *testing.T) {
 	// Wait for the watcher to evolve the model.
 	waitFor(t, 2*time.Second, func() bool {
 		var placed int
-		_ = m.View(func(s *OrderStats) error {
+		_ = m.View(ctx, func(s *OrderStats) error {
 			placed = s.Placed
 			return nil
 		})
@@ -560,7 +560,7 @@ func TestModelWatcher(t *testing.T) {
 	// Wait for the watcher to evolve the model.
 	waitFor(t, 2*time.Second, func() bool {
 		var shipped int
-		_ = m.View(func(s *OrderStats) error {
+		_ = m.View(ctx, func(s *OrderStats) error {
 			shipped = s.Shipped
 			return nil
 		})
@@ -573,7 +573,7 @@ type batchOrderModel struct {
 	Placed int
 }
 
-func (m *batchOrderModel) Decide(cmd *Command) ([]*Event, error) {
+func (m *batchOrderModel) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 	return []*Event{
 		{Entity: "store.1", Data: &OrderPlaced{}},
 		{Entity: "store.1", Data: &OrderPlaced{}},
@@ -581,7 +581,7 @@ func (m *batchOrderModel) Decide(cmd *Command) ([]*Event, error) {
 	}, nil
 }
 
-func (m *batchOrderModel) Evolve(event *Event) error {
+func (m *batchOrderModel) Evolve(ctx context.Context, event *Event) error {
 	switch event.Data.(type) {
 	case *OrderPlaced:
 		m.Placed++
@@ -631,7 +631,7 @@ func TestDecideAndEvolveBatchSequences(t *testing.T) {
 
 type mixedEntitiesModel struct{}
 
-func (m *mixedEntitiesModel) Decide(cmd *Command) ([]*Event, error) {
+func (m *mixedEntitiesModel) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 	return []*Event{
 		{Entity: "order.1", Data: &OrderPlaced{}},
 		{Entity: "order.2", Data: &OrderPlaced{}},
@@ -639,7 +639,7 @@ func (m *mixedEntitiesModel) Decide(cmd *Command) ([]*Event, error) {
 	}, nil
 }
 
-func (m *mixedEntitiesModel) Evolve(event *Event) error {
+func (m *mixedEntitiesModel) Evolve(ctx context.Context, event *Event) error {
 	return nil
 }
 
@@ -677,7 +677,7 @@ func TestMixedEntities(t *testing.T) {
 	// Wait for the watcher to evolve all events before the next Decide
 	// so that auto-Expect reflects the correct sequences.
 	waitFor(t, 2*time.Second, func() bool {
-		testEvents, _ := m.Decide(nil)
+		testEvents, _ := m.Decide(ctx, nil)
 		for _, e := range testEvents {
 			if e.Entity == "order.2" && e.Expect != nil && e.Expect.Sequence == 3 {
 				return true
