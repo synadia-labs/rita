@@ -125,7 +125,7 @@ func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) error
 	}
 	if _, err := s.js.CreateConsumer(ctx, s.streamName(), cc); err != nil {
 		if errors.Is(err, jetstream.ErrConsumerExists) {
-			return fmt.Errorf("%w: %w", ErrReactorExists, err)
+			return fmt.Errorf("%w: %v", ErrReactorExists, err)
 		}
 		return fmt.Errorf("rita: create reactor: %w", err)
 	}
@@ -161,7 +161,7 @@ func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) error
 	}
 	if _, err := s.js.UpdateConsumer(ctx, s.streamName(), cc); err != nil {
 		if errors.Is(err, jetstream.ErrConsumerDoesNotExist) || errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+			return fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 		}
 		return fmt.Errorf("rita: update reactor: %w", err)
 	}
@@ -199,7 +199,7 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 	}
 	if err := s.js.DeleteConsumer(ctx, s.streamName(), name); err != nil {
 		if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
-			return fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+			return fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 		}
 		return fmt.Errorf("rita: delete reactor: %w", err)
 	}
@@ -216,7 +216,7 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (*ReactorInfo,
 	cons, err := s.js.Consumer(ctx, s.streamName(), name)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return nil, fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+			return nil, fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 		}
 		return nil, fmt.Errorf("rita: get reactor: %w", err)
 	}
@@ -290,7 +290,7 @@ func (s *EventStore) React(ctx context.Context, name string, handler ReactorHand
 	cons, err := s.js.Consumer(ctx, s.streamName(), name)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return nil, fmt.Errorf("%w: %w", ErrReactorNotFound, err)
+			return nil, fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 		}
 		return nil, fmt.Errorf("rita: lookup reactor consumer: %w", err)
 	}

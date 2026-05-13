@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
 )
@@ -84,6 +85,9 @@ func TestReact_WithoutCreateReturnsNotFound(t *testing.T) {
 	_, err := es.React(context.Background(), "missing", func(_ context.Context, _ *Event) error { return nil })
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
+	}
+	if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
 	}
 }
 
@@ -394,6 +398,9 @@ func TestCreateReactor_DifferentConfigReturnsExists(t *testing.T) {
 	if !errors.Is(err, ErrReactorExists) {
 		t.Fatalf("expected ErrReactorExists, got %v", err)
 	}
+	if errors.Is(err, jetstream.ErrConsumerExists) {
+		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
+	}
 }
 
 func TestUpdateReactor_NotFound(t *testing.T) {
@@ -401,6 +408,9 @@ func TestUpdateReactor_NotFound(t *testing.T) {
 	err := es.UpdateReactor(context.Background(), ReactorConfig{Name: "missing"})
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
+	}
+	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
+		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
 	}
 }
 
@@ -477,6 +487,9 @@ func TestDeleteReactor_NotFound(t *testing.T) {
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
 	}
+	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
+		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
+	}
 }
 
 func TestDeleteReactor_ThenGetReturnsNotFound(t *testing.T) {
@@ -492,6 +505,9 @@ func TestDeleteReactor_ThenGetReturnsNotFound(t *testing.T) {
 	_, err := es.GetReactor(ctx, "del")
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
+	}
+	if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
 	}
 }
 
