@@ -148,6 +148,9 @@ func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) error
 // at the boundary on every call, so an empty MaxAckPending does not silently
 // flip the durable to the JetStream server default of 1000. Filter and
 // BackOff slices are taken at face value: nil/empty means "no filters"/"no backoff".
+// UpdateReactor persists the durable config only; running Reactor instances do
+// not hot-reload updated settings. Restart React to apply changed runtime retry
+// behavior such as BackOff.
 //
 // Returns ErrReactorNotFound if no durable with this name exists.
 func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) error {
@@ -277,8 +280,11 @@ type reactor struct {
 // dispatching events.
 //
 // The durable must already exist (via CreateReactor or CreateOrUpdateReactor);
-// React does not create or modify the consumer. Returns ErrReactorNotFound
-// if no durable with this name exists on the EventStore's stream.
+// React does not create or modify the consumer. Runtime settings used by the
+// returned Reactor, such as BackOff, are snapshotted when React starts; later
+// UpdateReactor calls affect the durable and will be observed on the next React
+// start, not by an already-running Reactor. Returns ErrReactorNotFound if no
+// durable with this name exists on the EventStore's stream.
 func (s *EventStore) React(ctx context.Context, name string, handler ReactorHandler) (Reactor, error) {
 	if name == "" {
 		return nil, ErrReactorNameRequired
