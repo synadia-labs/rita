@@ -518,6 +518,37 @@ func TestListReactors_ReturnsCreated(t *testing.T) {
 	}
 }
 
+func TestListReactors_ExcludesEphemeralConsumers(t *testing.T) {
+	es := newReactTestStore(t)
+	ctx := context.Background()
+
+	if err := es.CreateReactor(ctx, ReactorConfig{Name: "durable-one"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var events eventSlice
+	w, err := es.Watch(ctx, &events, WithNoWait())
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	defer w.Stop()
+
+	infos, err := es.ListReactors(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(infos) != 1 {
+		names := make([]string, 0, len(infos))
+		for _, info := range infos {
+			names = append(names, info.Name)
+		}
+		t.Fatalf("expected exactly 1 reactor, got %d: %v", len(infos), names)
+	}
+	if infos[0].Name != "durable-one" {
+		t.Fatalf("expected durable-one, got %q", infos[0].Name)
+	}
+}
+
 func TestReact_ConsumeErrHandlerLogsAfterDelete(t *testing.T) {
 	var buf bytes.Buffer
 	var mu sync.Mutex

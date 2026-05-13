@@ -223,9 +223,10 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (*ReactorInfo,
 	return s.reactorInfoFromJS(cons.CachedInfo()), nil
 }
 
-// ListReactors returns every consumer on the stream backing this EventStore,
-// including consumers created outside Rita. The result is not filtered by
-// any Rita-specific marker - what's on the stream is what you get.
+// ListReactors returns durable consumers on the stream backing this EventStore.
+// Ephemeral consumers - including those created internally by Evolve and Watch -
+// are excluded. Durable consumers created outside Rita are included: the filter
+// is on whether the consumer has a Durable name, not on any Rita-specific marker.
 func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
 	stream, err := s.js.Stream(ctx, s.streamName())
 	if err != nil {
@@ -234,6 +235,9 @@ func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
 	lister := stream.ListConsumers(ctx)
 	var out []*ReactorInfo
 	for info := range lister.Info() {
+		if info.Config.Durable == "" {
+			continue
+		}
 		out = append(out, s.reactorInfoFromJS(info))
 	}
 	if err := lister.Err(); err != nil {
