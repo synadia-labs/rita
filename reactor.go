@@ -28,7 +28,10 @@ type ReactorHandler func(ctx context.Context, ev *Event) error
 
 // Reactor is an active durable subscription. Stop drains in-flight messages
 // within ctx's deadline; the durable persists in JetStream, so a subsequent
-// React call with the same name resumes from the stored position.
+// React call with the same name resumes from the stored position. If ctx's
+// deadline expires first, Stop returns ctx.Err(), cancels handler work so
+// in-flight operations can abort, and may be called again to wait for final
+// shutdown.
 //
 // Stop does not delete the durable consumer. To remove the underlying
 // JetStream consumer, call (*EventStore).DeleteReactor. If DeleteReactor is
@@ -266,12 +269,10 @@ type reactor struct {
 	durable string
 	handler ReactorHandler
 	backOff []time.Duration
-	// handlerCtx is cancelled when Stop's own ctx fires so in-flight handlers
-	// can abort I/O once the graceful-shutdown deadline is exceeded.
+	// handlerCtx is cancelled when Stop gives up waiting or completes so handlers can abort and release resources.
 	handlerCtx    context.Context
 	cancelHandler context.CancelFunc
 	cc            jetstream.ConsumeContext
-	wg            sync.WaitGroup
 	stopped       chan struct{}
 	once          sync.Once
 }
@@ -324,9 +325,6 @@ func (s *EventStore) React(ctx context.Context, name string, handler ReactorHand
 }
 
 func (r *reactor) dispatch(msg jetstream.Msg) {
-	r.wg.Add(1)
-	defer r.wg.Done()
-
 	ev, err := r.es.unpackEvent(msg)
 	if err != nil {
 		r.es.logger.Error("reactor unpack failed", "durable", r.durable, "error", err)
@@ -351,7 +349,10 @@ func (r *reactor) nak(msg jetstream.Msg) {
 	}
 	// JetStream's BackOff config only applies to AckWait timeouts, not explicit Naks.
 	delay := r.backOff[len(r.backOff)-1]
-	if md, err := msg.Metadata(); err == nil && md.NumDelivered > 0 {
+	md, err := msg.Metadata()
+	if err != nil {
+		r.es.logger.Warn("reactor metadata read failed", "durable", r.durable, "error", err)
+	} else if md.NumDelivered > 0 {
 		idx := int(md.NumDelivered) - 1
 		if idx < len(r.backOff) {
 			delay = r.backOff[idx]
@@ -372,16 +373,16 @@ func (r *reactor) Stop(ctx context.Context) error {
 		r.cc.Drain()
 		go func() {
 			<-r.cc.Closed()
-			r.wg.Wait()
 			close(r.stopped)
 		}()
 	})
 
-	defer r.cancelHandler()
 	select {
 	case <-r.stopped:
+		r.cancelHandler()
 		return nil
 	case <-ctx.Done():
+		r.cancelHandler()
 		return ctx.Err()
 	}
 }
