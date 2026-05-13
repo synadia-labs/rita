@@ -86,7 +86,7 @@ func TestReact_WithoutCreateReturnsNotFound(t *testing.T) {
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
 	}
-	if errors.Is(err, jetstream.ErrConsumerNotFound) {
+	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
 		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
 	}
 }
