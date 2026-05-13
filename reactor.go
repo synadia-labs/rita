@@ -214,6 +214,9 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 
 // GetReactor returns a point-in-time snapshot of the reactor durable.
 //
+// Durable consumers created outside Rita are visible; there is no Rita-specific
+// marker to distinguish them.
+//
 // Returns ErrReactorNotFound if no durable with this name exists.
 func (s *EventStore) GetReactor(ctx context.Context, name string) (*ReactorInfo, error) {
 	if name == "" {
