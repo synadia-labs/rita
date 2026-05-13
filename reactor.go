@@ -224,7 +224,7 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (*ReactorInfo,
 	}
 	cons, err := s.js.Consumer(ctx, s.streamName(), name)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
 			return nil, fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 		}
 		return nil, fmt.Errorf("rita: get reactor: %w", err)
@@ -299,7 +299,7 @@ func (s *EventStore) React(ctx context.Context, name string, handler ReactorHand
 
 	cons, err := s.js.Consumer(ctx, s.streamName(), name)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
 			return nil, fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 		}
 		return nil, fmt.Errorf("rita: lookup reactor consumer: %w", err)
