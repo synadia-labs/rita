@@ -60,6 +60,13 @@ func WithLogger(logger *slog.Logger) ManagerOption {
 	})
 }
 
+func WithJetStreamOpts(jsOpts ...jetstream.JetStreamOpt) ManagerOption {
+	return managerOption(func(o *Manager) error {
+		o.jsOpts = jsOpts
+		return nil
+	})
+}
+
 func eventSubject(name string, event *Event) string {
 	return fmt.Sprintf(eventStoreSubjectTmpl+"%s.%s", name, event.Entity, event.Type)
 }
@@ -83,6 +90,7 @@ type Manager struct {
 	logger *slog.Logger
 	nc     *nats.Conn
 	js     jetstream.JetStream
+	jsOpts []jetstream.JetStreamOpt
 	types  *types.Registry
 	id     id.ID
 	clock  clock.Clock
@@ -188,15 +196,9 @@ func (m *Manager) DeleteEventStore(ctx context.Context, name string) error {
 
 // New initializes a new Manager instance with a NATS connection.
 func New(nc *nats.Conn, opts ...ManagerOption) (*Manager, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
 	m := &Manager{
 		nc:     nc,
 		logger: slog.Default(),
-		js:     js,
 		id:     id.NUID,
 		clock:  clock.Time,
 	}
@@ -206,6 +208,25 @@ func New(nc *nats.Conn, opts ...ManagerOption) (*Manager, error) {
 			return nil, err
 		}
 	}
+
+	var jsOpts jetstream.JetStreamOptions
+	for _, opt := range m.jsOpts {
+		if err := opt(&jsOpts); err != nil {
+			return nil, err
+		}
+	}
+
+	var js jetstream.JetStream
+	var err error
+	if jsOpts.APIPrefix != "" {
+		js, err = jetstream.NewWithAPIPrefix(nc, jsOpts.APIPrefix, m.jsOpts...)
+	} else {
+		js, err = jetstream.New(nc, m.jsOpts...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.js = js
 
 	return m, nil
 }

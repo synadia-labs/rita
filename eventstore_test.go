@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/id"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
@@ -134,6 +135,42 @@ func TestEventStoreNoRegistry(t *testing.T) {
 
 	var events eventSlice
 
+	_, err = es.Evolve(ctx, &events)
+	is.NoErr(err)
+	is.Equal(events[0].Type, "foo")
+	is.Equal(events[0].Data, []byte("hello"))
+}
+
+func TestWithJetStreamOpts_APIPrefix(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServerWithDomain(t, "test")
+	defer testutil.ShutdownNatsServer(srv)
+
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
+
+	m, err := New(nc, WithJetStreamOpts(func(opts *jetstream.JetStreamOptions) error {
+		opts.APIPrefix = "$JS.test.API"
+		return nil
+	}))
+	is.NoErr(err)
+
+	ctx := context.Background()
+	es, err := m.CreateEventStore(ctx, EventStoreConfig{
+		Name: "store",
+	})
+	is.NoErr(err)
+
+	seq, err := es.Append(ctx, []*Event{{
+		Entity: "order.1",
+		Type:   "foo",
+		Data:   []byte("hello"),
+	}})
+	is.NoErr(err)
+	is.Equal(seq, uint64(1))
+
+	var events eventSlice
 	_, err = es.Evolve(ctx, &events)
 	is.NoErr(err)
 	is.Equal(events[0].Type, "foo")
