@@ -695,3 +695,120 @@ func TestMixedEntities(t *testing.T) {
 	is.Equal(seq, uint64(6))
 	is.Equal(len(events), 3)
 }
+
+func TestFiltersToSubjects(t *testing.T) {
+	es := &EventStore{name: "demo"}
+
+	tests := []struct {
+		name    string
+		filters []string
+		want    []string
+		wantErr error
+	}{
+		{
+			name:    "nil filters",
+			filters: nil,
+			want:    []string{},
+		},
+		{
+			name:    "empty pattern expands to triple wildcard",
+			filters: []string{""},
+			want:    []string{"$ES.demo.*.*.*"},
+		},
+		{
+			name:    "single token pads with wildcards",
+			filters: []string{"order"},
+			want:    []string{"$ES.demo.order.*.*"},
+		},
+		{
+			name:    "two tokens pad once",
+			filters: []string{"order.1"},
+			want:    []string{"$ES.demo.order.1.*"},
+		},
+		{
+			name:    "three tokens kept verbatim",
+			filters: []string{"order.1.order-placed"},
+			want:    []string{"$ES.demo.order.1.order-placed"},
+		},
+		{
+			name:    "wildcards preserved",
+			filters: []string{"*.*.order-shipped"},
+			want:    []string{"$ES.demo.*.*.order-shipped"},
+		},
+		{
+			name:    "multiple filters",
+			filters: []string{"order", "*.*.order-shipped"},
+			want:    []string{"$ES.demo.order.*.*", "$ES.demo.*.*.order-shipped"},
+		},
+		{
+			name:    "too many tokens errors",
+			filters: []string{"a.b.c.d"},
+			wantErr: ErrSubjectTooManyTokens,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			is := testutil.NewIs(t)
+			got, err := es.filtersToSubjects(tc.filters)
+			if tc.wantErr != nil {
+				is.Err(err, tc.wantErr)
+				return
+			}
+			is.NoErr(err)
+			is.Equal(got, tc.want)
+		})
+	}
+}
+
+func TestSubjectsToFilters(t *testing.T) {
+	es := &EventStore{name: "demo"}
+
+	tests := []struct {
+		name     string
+		subjects []string
+		want     []string
+	}{
+		{
+			name:     "nil subjects",
+			subjects: nil,
+			want:     []string{},
+		},
+		{
+			name:     "prefix stripped",
+			subjects: []string{"$ES.demo.*.*.order-shipped"},
+			want:     []string{"*.*.order-shipped"},
+		},
+		{
+			name:     "non-prefixed subject surfaced verbatim",
+			subjects: []string{"other.stream.subject"},
+			want:     []string{"other.stream.subject"},
+		},
+		{
+			name: "mixed prefixed and non-prefixed",
+			subjects: []string{
+				"$ES.demo.order.1.order-placed",
+				"foreign.subject",
+				"$ES.demo.*.*.order-shipped",
+			},
+			want: []string{
+				"order.1.order-placed",
+				"foreign.subject",
+				"*.*.order-shipped",
+			},
+		},
+		{
+			name:     "different store name does not match",
+			subjects: []string{"$ES.other.foo.bar.baz"},
+			want:     []string{"$ES.other.foo.bar.baz"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			is := testutil.NewIs(t)
+			got := es.subjectsToFilters(tc.subjects)
+			is.Equal(got, tc.want)
+		})
+	}
+}

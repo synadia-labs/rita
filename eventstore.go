@@ -81,6 +81,42 @@ func (s *EventStore) subjectPrefix(pattern string) string {
 	return fmt.Sprintf(eventStoreSubjectTmpl, s.name) + pattern
 }
 
+// streamName returns the JetStream stream name backing this EventStore.
+func (s *EventStore) streamName() string {
+	return fmt.Sprintf(eventStoreNameTmpl, s.name)
+}
+
+// filtersToSubjects expands user-supplied filter patterns to fully-qualified
+// JetStream subjects scoped to this store.
+func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
+	subjects := make([]string, len(filters))
+	for i, p := range filters {
+		pp, err := parsePattern(p)
+		if err != nil {
+			return nil, err
+		}
+		subjects[i] = s.subjectPrefix(pp)
+	}
+	return subjects, nil
+}
+
+// subjectsToFilters strips this store's subject prefix from a list of
+// fully-qualified JetStream subjects, returning the original filter patterns.
+// Subjects that don't carry the prefix are surfaced verbatim (e.g. consumers
+// created outside Rita).
+func (s *EventStore) subjectsToFilters(subjects []string) []string {
+	prefix := s.subjectPrefix("")
+	filters := make([]string, 0, len(subjects))
+	for _, fs := range subjects {
+		if rest, ok := strings.CutPrefix(fs, prefix); ok {
+			filters = append(filters, rest)
+		} else {
+			filters = append(filters, fs)
+		}
+	}
+	return filters
+}
+
 type options struct {
 	filters  []string
 	afterSeq *uint64
@@ -125,16 +161,29 @@ func WithStopSequence(seq uint64) EvolveOption {
 	})
 }
 
-// WithFilters specifies the subject filter to use when evolving state.
-// The filter can be in the form of `<entity-type>`, `<entity-type>.<entity-id>`,
-// or `<entity-type>.<entity-id>.<event-type>`. Wildcards can be used as well at
-// any token position.
-// This can be passed in `Evolve` and `Watch`.
-func WithFilters(filters ...string) EvolveOption {
-	return evolveOptFn(func(o *options) error {
-		o.filters = filters
-		return nil
-	})
+// FilterOption is the return type of WithFilters; it satisfies the option
+// interfaces accepted by Evolve and Watch. Filter knobs for reactors live on
+// ReactorConfig instead.
+type FilterOption interface {
+	EvolveOption
+}
+
+type filtersOption struct {
+	filters []string
+}
+
+func (f filtersOption) setOpt(o *options) error {
+	o.filters = f.filters
+	return nil
+}
+
+// WithFilters specifies the subject filter to use when evolving state or
+// watching. The filter can be in the form of `<entity-type>`,
+// `<entity-type>.<entity-id>`, or `<entity-type>.<entity-id>.<event-type>`.
+// Wildcards can be used as well at any token position. For reactors, set
+// filters on ReactorConfig.Filters at Create/Update time.
+func WithFilters(filters ...string) FilterOption {
+	return filtersOption{filters: filters}
 }
 
 // Watcher represents an active event subscription. Call Stop to
@@ -404,13 +453,9 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 
 // orderedConsumer builds an ordered consumer from the given options.
 func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream.Consumer, error) {
-	subjects := make([]string, len(o.filters))
-	for i, p := range o.filters {
-		pp, err := parsePattern(p)
-		if err != nil {
-			return nil, err
-		}
-		subjects[i] = s.subjectPrefix(pp)
+	subjects, err := s.filtersToSubjects(o.filters)
+	if err != nil {
+		return nil, err
 	}
 
 	sopts := jetstream.OrderedConsumerConfig{
@@ -428,8 +473,7 @@ func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	name := fmt.Sprintf(eventStoreNameTmpl, s.name)
-	return s.js.OrderedConsumer(ctx, name, sopts)
+	return s.js.OrderedConsumer(ctx, s.streamName(), sopts)
 }
 
 // Evolve loads events and evolves a model of state. The sequence of the
@@ -458,7 +502,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// to the current known state.
 	info := con.CachedInfo()
 	defer func() {
-		_ = s.js.DeleteConsumer(ctx, fmt.Sprintf(eventStoreNameTmpl, s.name), info.Name)
+		_ = s.js.DeleteConsumer(ctx, s.streamName(), info.Name)
 	}()
 
 	pending := info.NumPending
