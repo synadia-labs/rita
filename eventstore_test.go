@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/id"
 	"github.com/synadia-labs/rita/testutil"
 	"github.com/synadia-labs/rita/types"
@@ -141,7 +140,7 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	is.Equal(events[0].Data, []byte("hello"))
 }
 
-func TestWithJetStreamOpts_APIPrefix(t *testing.T) {
+func TestWithAPIPrefix(t *testing.T) {
 	is := testutil.NewIs(t)
 
 	srv := testutil.NewNatsServerWithDomain(t, "test")
@@ -150,10 +149,7 @@ func TestWithJetStreamOpts_APIPrefix(t *testing.T) {
 	nc, err := nats.Connect(srv.ClientURL())
 	is.NoErr(err)
 
-	m, err := New(nc, WithJetStreamOpts(func(opts *jetstream.JetStreamOptions) error {
-		opts.APIPrefix = "$JS.test.API"
-		return nil
-	}))
+	m, err := New(nc, WithAPIPrefix("$JS.test.API"))
 	is.NoErr(err)
 
 	ctx := context.Background()

@@ -60,9 +60,10 @@ func WithLogger(logger *slog.Logger) ManagerOption {
 	})
 }
 
-func WithJetStreamOpts(jsOpts ...jetstream.JetStreamOpt) ManagerOption {
+// WithAPIPrefix sets a custom JetStream API prefix on the NATS connection.
+func WithAPIPrefix(apiPrefix string) ManagerOption {
 	return managerOption(func(o *Manager) error {
-		o.jsOpts = jsOpts
+		o.apiPrefix = apiPrefix
 		return nil
 	})
 }
@@ -90,7 +91,7 @@ type Manager struct {
 	logger *slog.Logger
 	nc     *nats.Conn
 	js     jetstream.JetStream
-	jsOpts []jetstream.JetStreamOpt
+	apiPrefix string
 	types  *types.Registry
 	id     id.ID
 	clock  clock.Clock
@@ -209,19 +210,12 @@ func New(nc *nats.Conn, opts ...ManagerOption) (*Manager, error) {
 		}
 	}
 
-	var jsOpts jetstream.JetStreamOptions
-	for _, opt := range m.jsOpts {
-		if err := opt(&jsOpts); err != nil {
-			return nil, err
-		}
-	}
-
 	var js jetstream.JetStream
 	var err error
-	if jsOpts.APIPrefix != "" {
-		js, err = jetstream.NewWithAPIPrefix(nc, jsOpts.APIPrefix, m.jsOpts...)
+	if m.apiPrefix != "" {
+		js, err = jetstream.NewWithAPIPrefix(nc, m.apiPrefix)
 	} else {
-		js, err = jetstream.New(nc, m.jsOpts...)
+		js, err = jetstream.New(nc)
 	}
 	if err != nil {
 		return nil, err
