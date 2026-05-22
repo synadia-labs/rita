@@ -1,6 +1,6 @@
 // Reactor-lifecycle demonstrates the Rita reactor lifecycle methods on
 // *EventStore: CreateReactor, GetReactor, UpdateReactor, ListReactors,
-// React (runtime), and DeleteReactor. CreateOrUpdateReactor is intentionally
+// Bind (runtime), and DeleteReactor. CreateOrUpdateReactor is intentionally
 // omitted see ./examples/reactor for the CreateOrUpdateReactor example.
 //
 // Run with: go run ./examples/reactor-lifecycle
@@ -74,20 +74,25 @@ func run() error {
 	}
 
 	fmt.Println("== CreateReactor ==")
-	if err := es.CreateReactor(ctx, rita.ReactorConfig{
+	r, err := es.CreateReactor(ctx, rita.ReactorConfig{
 		Name:        name,
 		Description: "logs shipped orders",
 		Filters:     []string{"*.*.order-shipped"},
 		AckWait:     5 * time.Second,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("create reactor: %w", err)
 	}
 	fmt.Printf("created %q\n\n", name)
 
 	fmt.Println("== GetReactor ==")
-	info, err := es.GetReactor(ctx, name)
+	rGet, err := es.GetReactor(ctx, name)
 	if err != nil {
 		return fmt.Errorf("get reactor: %w", err)
+	}
+	info, err := rGet.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("info: %w", err)
 	}
 	fmt.Printf("name=%s ack_wait=%s max_ack_pending=%d filters=%v\n\n",
 		info.Name, info.Config.AckWait, info.Config.MaxAckPending, info.Config.Filters)
@@ -96,12 +101,16 @@ func run() error {
 	cfg := info.Config
 	cfg.AckWait = 10 * time.Second
 	cfg.Description = "logs shipped orders"
-	if err := es.UpdateReactor(ctx, cfg); err != nil {
+	if _, err := es.UpdateReactor(ctx, cfg); err != nil {
 		return fmt.Errorf("update reactor: %w", err)
 	}
-	updated, err := es.GetReactor(ctx, name)
+	updatedR, err := es.GetReactor(ctx, name)
 	if err != nil {
 		return fmt.Errorf("get reactor after update: %w", err)
+	}
+	updated, err := updatedR.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("info after update: %w", err)
 	}
 	fmt.Printf("updated ack_wait=%s description=%q\n\n", updated.Config.AckWait, updated.Config.Description)
 
@@ -110,8 +119,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("list reactors: %w", err)
 	}
-	for _, r := range reactors {
-		fmt.Printf("- %s (pending=%d)\n\n", r.Name, r.NumPending)
+	for _, ri := range reactors {
+		fmt.Printf("- %s (pending=%d)\n\n", ri.Name, ri.NumPending)
 	}
 
 	fmt.Println("== GetReactor ==")
@@ -119,16 +128,20 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("get reactor err: %w", err)
 	}
+	reactorGetInfo, err := reactorGet.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("info: %w", err)
+	}
 	fmt.Printf(
 		"name=%s\nack_wait=%s\nmax_ack_pending=%d\nfilters=%v\ncreated=%v\n\n",
-		reactorGet.Name,
-		reactorGet.Config.AckWait,
-		reactorGet.Config.MaxAckPending,
-		reactorGet.Config.Filters,
-		reactorGet.Created,
+		reactorGetInfo.Name,
+		reactorGetInfo.Config.AckWait,
+		reactorGetInfo.Config.MaxAckPending,
+		reactorGetInfo.Config.Filters,
+		reactorGetInfo.Created,
 	)
 
-	fmt.Println("== React ==")
+	fmt.Println("== Bind ==")
 	if _, err := es.Append(ctx, []*rita.Event{
 		{Entity: "order.1001", Data: &OrderPlaced{OrderID: "1001"}},
 		{Entity: "order.1001", Data: &OrderShipped{OrderID: "1001", Carrier: "UPS"}},
@@ -149,18 +162,17 @@ func run() error {
 		return nil
 	}
 
-	r, err := es.React(ctx, name, handler)
-	if err != nil {
-		return fmt.Errorf("react: %w", err)
+	if err := r.Bind(ctx, handler); err != nil {
+		return fmt.Errorf("bind: %w", err)
 	}
 	wg.Wait()
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	unbindCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := r.Stop(stopCtx); err != nil {
-		return fmt.Errorf("stop: %w", err)
+	if err := r.Unbind(unbindCtx); err != nil {
+		return fmt.Errorf("unbind: %w", err)
 	}
-	fmt.Printf("reactor stopped (durable still exists)\n")
+	fmt.Printf("reactor unbound (durable still exists)\n\n")
 
 	fmt.Println("== DeleteReactor ==")
 	if err := es.DeleteReactor(ctx, name); err != nil {

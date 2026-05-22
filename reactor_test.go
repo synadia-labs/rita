@@ -54,35 +54,53 @@ func newReactTestStoreWithLogger(t *testing.T, logger *slog.Logger) *EventStore 
 	return es
 }
 
-func mustCreateReactor(t *testing.T, es *EventStore, cfg ReactorConfig) {
+func mustCreateReactor(t *testing.T, es *EventStore, cfg ReactorConfig) Reactor {
 	t.Helper()
-	if err := es.CreateReactor(context.Background(), cfg); err != nil {
+	r, err := es.CreateReactor(context.Background(), cfg)
+	if err != nil {
 		t.Fatalf("create reactor %q: %v", cfg.Name, err)
 	}
+	return r
 }
 
-func TestReact_EmptyName(t *testing.T) {
+func mustBindReactor(t *testing.T, es *EventStore, name string, handler ReactorHandler) Reactor {
+	t.Helper()
+	r, err := es.GetReactor(context.Background(), name)
+	if err != nil {
+		t.Fatalf("get reactor %q: %v", name, err)
+	}
+	if err := r.Bind(context.Background(), handler); err != nil {
+		t.Fatalf("bind reactor %q: %v", name, err)
+	}
+	return r
+}
+
+func TestGetReactor_EmptyName(t *testing.T) {
 	es := newReactTestStore(t)
 
-	_, err := es.React(context.Background(), "", func(_ context.Context, _ *Event) error { return nil })
+	_, err := es.GetReactor(context.Background(), "")
 	if !errors.Is(err, ErrReactorNameRequired) {
 		t.Fatalf("expected ErrReactorNameRequired, got %v", err)
 	}
 }
 
-func TestReact_NilHandler(t *testing.T) {
+func TestBind_NilHandler(t *testing.T) {
 	es := newReactTestStore(t)
+	mustCreateReactor(t, es, ReactorConfig{Name: "nil-handler"})
 
-	_, err := es.React(context.Background(), "durable", nil)
-	if !errors.Is(err, ErrReactorHandlerRequired) {
+	r, err := es.GetReactor(context.Background(), "nil-handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Bind(context.Background(), nil); !errors.Is(err, ErrReactorHandlerRequired) {
 		t.Fatalf("expected ErrReactorHandlerRequired, got %v", err)
 	}
 }
 
-func TestReact_WithoutCreateReturnsNotFound(t *testing.T) {
+func TestGetReactor_NotFound(t *testing.T) {
 	es := newReactTestStore(t)
 
-	_, err := es.React(context.Background(), "missing", func(_ context.Context, _ *Event) error { return nil })
+	_, err := es.GetReactor(context.Background(), "missing")
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
 	}
@@ -91,7 +109,7 @@ func TestReact_WithoutCreateReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestReact_BasicDelivery(t *testing.T) {
+func TestReactor_BasicDelivery(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
@@ -104,21 +122,18 @@ func TestReact_BasicDelivery(t *testing.T) {
 	mustCreateReactor(t, es, ReactorConfig{Name: "basic"})
 
 	var got atomic.Int32
-	r, err := es.React(ctx, "basic", func(_ context.Context, ev *Event) error {
+	r := mustBindReactor(t, es, "basic", func(_ context.Context, ev *Event) error {
 		if ev.Type == "order-placed" {
 			got.Add(1)
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Stop(context.Background()) }()
+	defer func() { _ = r.Unbind(context.Background()) }()
 
 	waitFor(t, 2*time.Second, func() bool { return got.Load() >= 1 })
 }
 
-func TestReact_ResumesFromStoredPosition(t *testing.T) {
+func TestReactor_ResumesFromStoredPosition(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
@@ -131,18 +146,15 @@ func TestReact_ResumesFromStoredPosition(t *testing.T) {
 	mustCreateReactor(t, es, ReactorConfig{Name: "resume"})
 
 	var first atomic.Int32
-	r1, err := es.React(ctx, "resume", func(_ context.Context, _ *Event) error {
+	r1 := mustBindReactor(t, es, "resume", func(_ context.Context, _ *Event) error {
 		first.Add(1)
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	waitFor(t, 2*time.Second, func() bool { return first.Load() >= 1 })
 
-	if err := r1.Stop(context.Background()); err != nil {
-		t.Fatalf("stop r1: %v", err)
+	if err := r1.Unbind(context.Background()); err != nil {
+		t.Fatalf("unbind r1: %v", err)
 	}
 
 	if _, err := es.Append(ctx, []*Event{
@@ -153,15 +165,12 @@ func TestReact_ResumesFromStoredPosition(t *testing.T) {
 
 	var second atomic.Int32
 	var seenType atomic.Value
-	r2, err := es.React(ctx, "resume", func(_ context.Context, ev *Event) error {
+	r2 := mustBindReactor(t, es, "resume", func(_ context.Context, ev *Event) error {
 		seenType.Store(ev.Type)
 		second.Add(1)
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r2.Stop(context.Background()) }()
+	defer func() { _ = r2.Unbind(context.Background()) }()
 
 	waitFor(t, 2*time.Second, func() bool { return second.Load() >= 1 })
 
@@ -170,7 +179,7 @@ func TestReact_ResumesFromStoredPosition(t *testing.T) {
 	}
 }
 
-func TestReact_BackOffAppliedOnNak(t *testing.T) {
+func TestReactor_BackOffAppliedOnNak(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
@@ -193,16 +202,13 @@ func TestReact_BackOffAppliedOnNak(t *testing.T) {
 		mu         sync.Mutex
 		deliveries []time.Time
 	)
-	r, err := es.React(ctx, "backoff", func(_ context.Context, _ *Event) error {
+	r := mustBindReactor(t, es, "backoff", func(_ context.Context, _ *Event) error {
 		mu.Lock()
 		deliveries = append(deliveries, time.Now())
 		mu.Unlock()
 		return errors.New("force nak")
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Stop(context.Background()) }()
+	defer func() { _ = r.Unbind(context.Background()) }()
 
 	waitFor(t, 2*time.Second, func() bool {
 		mu.Lock()
@@ -219,7 +225,7 @@ func TestReact_BackOffAppliedOnNak(t *testing.T) {
 	}
 }
 
-func TestReact_HandlerCtxCancelledOnStopDeadline(t *testing.T) {
+func TestReactor_HandlerCtxCancelledOnUnbindDeadline(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
@@ -229,19 +235,16 @@ func TestReact_HandlerCtxCancelledOnStopDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustCreateReactor(t, es, ReactorConfig{Name: "stop-cancel", AckWait: 10 * time.Second})
+	mustCreateReactor(t, es, ReactorConfig{Name: "unbind-cancel", AckWait: 10 * time.Second})
 
 	handlerEntered := make(chan struct{})
 	handlerCtxErr := make(chan error, 1)
-	r, err := es.React(ctx, "stop-cancel", func(hctx context.Context, _ *Event) error {
+	r := mustBindReactor(t, es, "unbind-cancel", func(hctx context.Context, _ *Event) error {
 		close(handlerEntered)
 		<-hctx.Done()
 		handlerCtxErr <- hctx.Err()
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	select {
 	case <-handlerEntered:
@@ -249,10 +252,10 @@ func TestReact_HandlerCtxCancelledOnStopDeadline(t *testing.T) {
 		t.Fatal("handler never started")
 	}
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	unbindCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := r.Stop(stopCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected deadline exceeded from Stop, got %v", err)
+	if err := r.Unbind(unbindCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded from Unbind, got %v", err)
 	}
 
 	select {
@@ -261,15 +264,15 @@ func TestReact_HandlerCtxCancelledOnStopDeadline(t *testing.T) {
 			t.Fatalf("expected handler ctx Canceled, got %v", got)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("handler ctx was not cancelled after Stop deadline")
+		t.Fatal("handler ctx was not cancelled after Unbind deadline")
 	}
 
-	if err := r.Stop(context.Background()); err != nil {
-		t.Fatalf("final stop: %v", err)
+	if err := r.Unbind(context.Background()); err != nil {
+		t.Fatalf("final unbind: %v", err)
 	}
 }
 
-func TestReact_FiltersTranslation(t *testing.T) {
+func TestReactor_FiltersTranslation(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
@@ -285,15 +288,12 @@ func TestReact_FiltersTranslation(t *testing.T) {
 
 	var got atomic.Int32
 	var lastType atomic.Value
-	r, err := es.React(ctx, "filtered", func(_ context.Context, ev *Event) error {
+	r := mustBindReactor(t, es, "filtered", func(_ context.Context, ev *Event) error {
 		lastType.Store(ev.Type)
 		got.Add(1)
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Stop(context.Background()) }()
+	defer func() { _ = r.Unbind(context.Background()) }()
 
 	waitFor(t, 2*time.Second, func() bool { return got.Load() >= 1 })
 
@@ -304,7 +304,7 @@ func TestReact_FiltersTranslation(t *testing.T) {
 
 func TestCreateReactor_EmptyName(t *testing.T) {
 	es := newReactTestStore(t)
-	if err := es.CreateReactor(context.Background(), ReactorConfig{}); !errors.Is(err, ErrReactorNameRequired) {
+	if _, err := es.CreateReactor(context.Background(), ReactorConfig{}); !errors.Is(err, ErrReactorNameRequired) {
 		t.Fatalf("expected ErrReactorNameRequired, got %v", err)
 	}
 }
@@ -321,13 +321,17 @@ func TestCreateReactor_GetReactor_Roundtrip(t *testing.T) {
 		MaxDeliver:    5,
 		AckWait:       7 * time.Second,
 	}
-	if err := es.CreateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateReactor(ctx, cfg); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	info, err := es.GetReactor(ctx, "rt")
+	r, err := es.GetReactor(ctx, "rt")
 	if err != nil {
 		t.Fatalf("get: %v", err)
+	}
+	info, err := r.Info(ctx)
+	if err != nil {
+		t.Fatalf("info: %v", err)
 	}
 	if info.Name != "rt" {
 		t.Fatalf("name: got %q want: %q", info.Name, "rt")
@@ -360,12 +364,16 @@ func TestCreateReactor_BackOffRoundtrip(t *testing.T) {
 		Name:    "bo",
 		BackOff: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond},
 	}
-	if err := es.CreateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateReactor(ctx, cfg); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	info, err := es.GetReactor(ctx, "bo")
+	r, err := es.GetReactor(ctx, "bo")
 	if err != nil {
 		t.Fatalf("get: %v", err)
+	}
+	info, err := r.Info(ctx)
+	if err != nil {
+		t.Fatalf("info: %v", err)
 	}
 	if len(info.Config.BackOff) != 2 ||
 		info.Config.BackOff[0] != 100*time.Millisecond ||
@@ -379,10 +387,10 @@ func TestCreateReactor_IdempotentOnMatchingConfig(t *testing.T) {
 	ctx := context.Background()
 
 	cfg := ReactorConfig{Name: "idem", AckWait: 5 * time.Second}
-	if err := es.CreateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateReactor(ctx, cfg); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	if err := es.CreateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateReactor(ctx, cfg); err != nil {
 		t.Fatalf("second create with same config: %v", err)
 	}
 }
@@ -391,10 +399,10 @@ func TestCreateReactor_DifferentConfigReturnsExists(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "conflict", AckWait: 5 * time.Second}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "conflict", AckWait: 5 * time.Second}); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	err := es.CreateReactor(ctx, ReactorConfig{Name: "conflict", AckWait: 10 * time.Second})
+	_, err := es.CreateReactor(ctx, ReactorConfig{Name: "conflict", AckWait: 10 * time.Second})
 	if !errors.Is(err, ErrReactorExists) {
 		t.Fatalf("expected ErrReactorExists, got %v", err)
 	}
@@ -405,7 +413,7 @@ func TestCreateReactor_DifferentConfigReturnsExists(t *testing.T) {
 
 func TestUpdateReactor_NotFound(t *testing.T) {
 	es := newReactTestStore(t)
-	err := es.UpdateReactor(context.Background(), ReactorConfig{Name: "missing"})
+	_, err := es.UpdateReactor(context.Background(), ReactorConfig{Name: "missing"})
 	if !errors.Is(err, ErrReactorNotFound) {
 		t.Fatalf("expected ErrReactorNotFound, got %v", err)
 	}
@@ -418,27 +426,35 @@ func TestUpdateReactor_GetModifyUpdate(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "upd", AckWait: 5 * time.Second, MaxAckPending: 3}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "upd", AckWait: 5 * time.Second, MaxAckPending: 3}); err != nil {
 		t.Fatal(err)
 	}
-	info, err := es.GetReactor(ctx, "upd")
+	r, err := es.GetReactor(ctx, "upd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := r.Info(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := info.Config
 	cfg.AckWait = 12 * time.Second
-	if err := es.UpdateReactor(ctx, cfg); err != nil {
+	if _, err := es.UpdateReactor(ctx, cfg); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	got, err := es.GetReactor(ctx, "upd")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Config.AckWait != 12*time.Second {
-		t.Fatalf("ack wait: got %v want 12s", got.Config.AckWait)
+	gotInfo, err := got.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got.Config.MaxAckPending != 3 {
-		t.Fatalf("max ack pending should round-trip via Get→Update: got %d want 3", got.Config.MaxAckPending)
+	if gotInfo.Config.AckWait != 12*time.Second {
+		t.Fatalf("ack wait: got %v want 12s", gotInfo.Config.AckWait)
+	}
+	if gotInfo.Config.MaxAckPending != 3 {
+		t.Fatalf("max ack pending should round-trip via Get→Update: got %d want 3", gotInfo.Config.MaxAckPending)
 	}
 }
 
@@ -446,13 +462,17 @@ func TestUpdateReactor_ReplaceWritesDefaults(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "replace", MaxAckPending: 9, AckWait: 8 * time.Second}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "replace", MaxAckPending: 9, AckWait: 8 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	if err := es.UpdateReactor(ctx, ReactorConfig{Name: "replace"}); err != nil {
+	if _, err := es.UpdateReactor(ctx, ReactorConfig{Name: "replace"}); err != nil {
 		t.Fatalf("update with partial config: %v", err)
 	}
-	info, err := es.GetReactor(ctx, "replace")
+	r, err := es.GetReactor(ctx, "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := r.Info(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,14 +489,14 @@ func TestCreateOrUpdateReactor_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	cfg := ReactorConfig{Name: "cou", AckWait: 5 * time.Second}
-	if err := es.CreateOrUpdateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateOrUpdateReactor(ctx, cfg); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if err := es.CreateOrUpdateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateOrUpdateReactor(ctx, cfg); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	cfg.AckWait = 9 * time.Second
-	if err := es.CreateOrUpdateReactor(ctx, cfg); err != nil {
+	if _, err := es.CreateOrUpdateReactor(ctx, cfg); err != nil {
 		t.Fatalf("third with different config: %v", err)
 	}
 }
@@ -496,7 +516,7 @@ func TestDeleteReactor_ThenGetReturnsNotFound(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "del"}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "del"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := es.DeleteReactor(ctx, "del"); err != nil {
@@ -515,10 +535,10 @@ func TestListReactors_ReturnsCreated(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "list-a"}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "list-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "list-b"}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "list-b"}); err != nil {
 		t.Fatal(err)
 	}
 	infos, err := es.ListReactors(ctx)
@@ -538,7 +558,7 @@ func TestListReactors_ExcludesEphemeralConsumers(t *testing.T) {
 	es := newReactTestStore(t)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "durable-one"}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "durable-one"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -565,7 +585,7 @@ func TestListReactors_ExcludesEphemeralConsumers(t *testing.T) {
 	}
 }
 
-func TestReact_ConsumeErrHandlerLogsAfterDelete(t *testing.T) {
+func TestReactor_ConsumeErrHandlerLogsAfterDelete(t *testing.T) {
 	var buf bytes.Buffer
 	var mu sync.Mutex
 	w := &lockedWriter{mu: &mu, buf: &buf}
@@ -574,18 +594,15 @@ func TestReact_ConsumeErrHandlerLogsAfterDelete(t *testing.T) {
 	es := newReactTestStoreWithLogger(t, logger)
 	ctx := context.Background()
 
-	if err := es.CreateReactor(ctx, ReactorConfig{Name: "errh"}); err != nil {
+	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "errh"}); err != nil {
 		t.Fatal(err)
 	}
 	var seen atomic.Int32
-	r, err := es.React(ctx, "errh", func(_ context.Context, _ *Event) error {
+	r := mustBindReactor(t, es, "errh", func(_ context.Context, _ *Event) error {
 		seen.Add(1)
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Stop(context.Background()) }()
+	defer func() { _ = r.Unbind(context.Background()) }()
 
 	if _, err := es.Append(ctx, []*Event{{Entity: "order.1", Data: &OrderPlaced{}}}); err != nil {
 		t.Fatal(err)
@@ -612,4 +629,89 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.buf.Write(p)
+}
+
+func TestReactor_Bind_ErrorWhenAlreadyBound(t *testing.T) {
+	es := newReactTestStore(t)
+	ctx := context.Background()
+	mustCreateReactor(t, es, ReactorConfig{Name: "double-bind"})
+
+	r := mustBindReactor(t, es, "double-bind", func(_ context.Context, _ *Event) error { return nil })
+	defer func() { _ = r.Unbind(context.Background()) }()
+
+	err := r.Bind(ctx, func(_ context.Context, _ *Event) error { return nil })
+	if !errors.Is(err, ErrReactorAlreadyBound) {
+		t.Fatalf("second Bind: want ErrReactorAlreadyBound, got %v", err)
+	}
+}
+
+func TestReactor_Rebind_AfterUnbind(t *testing.T) {
+	es := newReactTestStore(t)
+	ctx := context.Background()
+	mustCreateReactor(t, es, ReactorConfig{Name: "rebind"})
+
+	if _, err := es.Append(ctx, []*Event{
+		{Entity: "order.1", Data: &OrderPlaced{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var hits1 atomic.Int32
+	r := mustBindReactor(t, es, "rebind", func(_ context.Context, _ *Event) error {
+		hits1.Add(1)
+		return nil
+	})
+	waitFor(t, 2*time.Second, func() bool { return hits1.Load() >= 1 })
+
+	if err := r.Unbind(context.Background()); err != nil {
+		t.Fatalf("first Unbind: %v", err)
+	}
+
+	if _, err := es.Append(ctx, []*Event{
+		{Entity: "order.2", Data: &OrderPlaced{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var hits2 atomic.Int32
+	if err := r.Bind(ctx, func(_ context.Context, _ *Event) error {
+		hits2.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+	defer func() { _ = r.Unbind(context.Background()) }()
+	waitFor(t, 2*time.Second, func() bool { return hits2.Load() >= 1 })
+}
+
+func TestReactor_Info_FreshSnapshot(t *testing.T) {
+	es := newReactTestStore(t)
+	ctx := context.Background()
+	mustCreateReactor(t, es, ReactorConfig{Name: "info-test", AckWait: 7 * time.Second})
+
+	r := mustBindReactor(t, es, "info-test", func(_ context.Context, _ *Event) error { return nil })
+	defer func() { _ = r.Unbind(context.Background()) }()
+
+	info, err := r.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if info.Name != "info-test" {
+		t.Fatalf("Info().Name: want %q, got %q", "info-test", info.Name)
+	}
+	if info.Config.AckWait != 7*time.Second {
+		t.Fatalf("Info().Config.AckWait: want 7s, got %v", info.Config.AckWait)
+	}
+}
+
+func TestReactor_Name(t *testing.T) {
+	es := newReactTestStore(t)
+	mustCreateReactor(t, es, ReactorConfig{Name: "named"})
+
+	r := mustBindReactor(t, es, "named", func(_ context.Context, _ *Event) error { return nil })
+	defer func() { _ = r.Unbind(context.Background()) }()
+
+	if got := r.Name(); got != "named" {
+		t.Fatalf("Name(): want %q, got %q", "named", got)
+	}
 }

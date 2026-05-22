@@ -91,21 +91,21 @@ func run() error {
 		return nil
 	}
 
-	if err := es.CreateOrUpdateReactor(ctx, rita.ReactorConfig{
+	r, err := es.CreateOrUpdateReactor(ctx, rita.ReactorConfig{
 		Name:    "shipping-notifier",
 		Filters: []string{"*.*.order-shipped"},
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("create reactor: %w", err)
 	}
 
-	r, err := es.React(ctx, "shipping-notifier", handler)
-	if err != nil {
-		return fmt.Errorf("react: %w", err)
+	if err := r.Bind(ctx, handler); err != nil {
+		return fmt.Errorf("bind: %w", err)
 	}
 
 	wg.Wait()
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	unbindCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return r.Stop(stopCtx)
+	return r.Unbind(unbindCtx)
 }
