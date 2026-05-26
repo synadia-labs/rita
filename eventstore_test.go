@@ -140,6 +140,39 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	is.Equal(events[0].Data, []byte("hello"))
 }
 
+func TestWithAPIPrefix(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServerWithDomain(t, "test")
+	defer testutil.ShutdownNatsServer(srv)
+
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
+
+	m, err := New(nc, WithAPIPrefix("$JS.test.API"))
+	is.NoErr(err)
+
+	ctx := context.Background()
+	es, err := m.CreateEventStore(ctx, EventStoreConfig{
+		Name: "store",
+	})
+	is.NoErr(err)
+
+	seq, err := es.Append(ctx, []*Event{{
+		Entity: "order.1",
+		Type:   "foo",
+		Data:   []byte("hello"),
+	}})
+	is.NoErr(err)
+	is.Equal(seq, uint64(1))
+
+	var events eventSlice
+	_, err = es.Evolve(ctx, &events)
+	is.NoErr(err)
+	is.Equal(events[0].Type, "foo")
+	is.Equal(events[0].Data, []byte("hello"))
+}
+
 func TestEventStoreWithRegistry(t *testing.T) {
 	is := testutil.NewIs(t)
 
