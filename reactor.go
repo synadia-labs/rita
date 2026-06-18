@@ -139,6 +139,9 @@ func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 	if cfg.Name == "" {
 		return nil, ErrReactorNameRequired
 	}
+	if err := s.requireTenant(); err != nil {
+		return nil, err
+	}
 	cfg.applyDefaults()
 	cc, err := s.reactorConsumerConfig(cfg)
 	if err != nil {
@@ -181,6 +184,9 @@ func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 	if cfg.Name == "" {
 		return nil, ErrReactorNameRequired
 	}
+	if err := s.requireTenant(); err != nil {
+		return nil, err
+	}
 	cfg.applyDefaults()
 	cc, err := s.reactorConsumerConfig(cfg)
 	if err != nil {
@@ -201,6 +207,9 @@ func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 func (s *EventStore) CreateOrUpdateReactor(ctx context.Context, cfg ReactorConfig) (Reactor, error) {
 	if cfg.Name == "" {
 		return nil, ErrReactorNameRequired
+	}
+	if err := s.requireTenant(); err != nil {
+		return nil, err
 	}
 	cfg.applyDefaults()
 	cc, err := s.reactorConsumerConfig(cfg)
