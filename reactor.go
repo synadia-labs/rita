@@ -234,6 +234,9 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 	if name == "" {
 		return ErrReactorNameRequired
 	}
+	if err := s.requireTenant(); err != nil {
+		return err
+	}
 	if err := s.js.DeleteConsumer(ctx, s.streamName(), name); err != nil {
 		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
 			return mapped
@@ -250,6 +253,13 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 // Durable consumers created outside Rita are visible; there is no Rita-specific
 // marker to distinguish them.
 //
+// Tenant scope: lookup is stream-global by durable name and is NOT tenant-filtered,
+// even on a tenant store. The mutating reactor operations (Create/Update/
+// CreateOrUpdate/Delete) require a tenant scope so they build correctly scoped
+// filter subjects, but durable names share a single stream-wide namespace. Callers
+// that need per-tenant reactor isolation should namespace durable names per tenant
+// (e.g. "<tenant>-<name>"); library-side namespacing is a possible future addition.
+//
 // Returns ErrReactorNotFound if no durable with this name exists.
 func (s *EventStore) GetReactor(ctx context.Context, name string) (Reactor, error) {
 	if name == "" {
@@ -262,6 +272,12 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (Reactor, erro
 // Ephemeral consumers - including those created internally by Evolve and Watch -
 // are excluded. Durable consumers created outside Rita are included: the filter
 // is on whether the consumer has a Durable name, not on any Rita-specific marker.
+//
+// Tenant scope: listing is stream-global and is NOT filtered to the calling
+// handle's tenant. On a tenant store the result includes durables created under
+// every tenant; each ReactorInfo.Config.Filters reflects the durable's own
+// tenant-scoped subjects. See GetReactor for the rationale and the caller's
+// namespacing responsibility.
 func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
 	stream, err := s.js.Stream(ctx, s.streamName())
 	if err != nil {

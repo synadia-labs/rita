@@ -137,6 +137,9 @@ func TestTenantStoreEnforcement(t *testing.T) {
 	_, err = es.CreateReactor(ctx, ReactorConfig{Name: "r", Filters: []string{"*.*.order-placed"}})
 	is.Err(err, ErrTenantRequired)
 
+	err = es.DeleteReactor(ctx, "r")
+	is.Err(err, ErrTenantRequired)
+
 	// A scoped handle works.
 	acme, err := es.Tenant("acme")
 	is.NoErr(err)
@@ -256,4 +259,8 @@ func TestTenantReactorRoundTrip(t *testing.T) {
 	info, err := r.Info(ctx)
 	is.NoErr(err)
 	is.Equal(info.Config.Filters, []string{"*.*.order-shipped"})
+
+	// A scoped handle can delete its reactor.
+	err = acme.DeleteReactor(ctx, "shipper")
+	is.NoErr(err)
 }

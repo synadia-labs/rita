@@ -468,6 +468,8 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 // Decide is a convenience method that combines a model's Decide invocation
 // followed by an Append. If either step fails, an error is returned.
 func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([]*Event, uint64, error) {
+	// Guard before invoking the model so an unscoped handle cannot run the
+	// decider's side effects only to fail at Append (which re-checks).
 	if err := s.requireTenant(); err != nil {
 		return nil, 0, err
 	}
@@ -492,6 +494,8 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([
 // prior to the failure. Recovery is to call Evolve with WithAfterSequence to
 // replay the remaining events.
 func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
+	// Guard before invoking the model so an unscoped handle cannot run the
+	// decider's side effects only to fail at Append (which re-checks).
 	if err := s.requireTenant(); err != nil {
 		return nil, 0, err
 	}
