@@ -41,7 +41,7 @@ var (
 	ErrSubjectTooManyTokens   = errors.New("rita: subject can have at most three tokens")
 	ErrTenantInvalid          = errors.New("rita: tenant invalid")
 	ErrTenantNotSupported     = errors.New("rita: store is not tenant-enabled")
-	ErrTenantRequired         = errors.New("rita: tenant store requires a tenant scope")
+	ErrTenantRequired         = errors.New("rita: store requires a tenant scope")
 
 	// isSequenceConflict checks if the error is a JetStream wrong last sequence error.
 	isSequenceConflict = func(err error) bool {
@@ -52,15 +52,18 @@ var (
 		return false
 	}
 
-	// Entity regex: <entity-type>.<entity-id>. Note this is just a basic validation
-	// to ensure there are two tokens separated by a dot. Invalid characters will be
-	// caught by NATS server when publishing.
-	entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
+	// subjectToken matches a single NATS subject token: one or more characters
+	// that are not the token separator '.', a wildcard ('*' or '>'), or
+	// whitespace. These are the characters NATS does not allow inside a token, so
+	// rejecting them here stops an invalid entity or tenant from injecting extra
+	// tokens or wildcards into a subject.
+	subjectToken = `[^.*>\s]+`
 
-	// Tenant regex: a single subject token. Non-empty and free of '.', '*', '>',
-	// and whitespace so a tenant cannot inject extra tokens or wildcards into the
-	// subject. Mirrors entityRegex in spirit.
-	tenantRegex = regexp.MustCompile(`^[^.*>\s]+$`)
+	// Entity regex: <entity-type>.<entity-id> — two subject tokens joined by a dot.
+	entityRegex = regexp.MustCompile(`^` + subjectToken + `\.` + subjectToken + `$`)
+
+	// Tenant regex: a single subject token.
+	tenantRegex = regexp.MustCompile(`^` + subjectToken + `$`)
 )
 
 // parsePattern parses a subject pattern into the full form with exactly three tokens.
@@ -109,7 +112,7 @@ func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
 	// the whole stream. Untenanted stores keep the historical "no filters means
 	// whole stream" behavior (empty FilterSubjects).
 	if len(filters) == 0 && s.tenant != "" {
-		filters = []string{""}
+		filters = []string{"*.*.*"}
 	}
 	subjects := make([]string, len(filters))
 	for i, p := range filters {

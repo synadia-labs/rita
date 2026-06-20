@@ -19,9 +19,9 @@ const (
 
 	// tenantMetaKey marks a stream as a tenant store via its metadata. Its
 	// presence is what GetEventStore keys on to set the store's mode; the value
-	// documents the mode. The mode is fixed at creation and never toggled.
+	// is a minimal non-empty marker. The mode is fixed at creation and never toggled.
 	tenantMetaKey = "rita.tenant"
-	tenantMetaVal = "required"
+	tenantMetaVal = "1"
 )
 
 type managerOption func(o *Manager) error
@@ -98,20 +98,19 @@ type EventStoreConfig struct {
 	// through a tenant-scoped handle (see (*EventStore).Tenant) and every event
 	// subject carries a leading tenant token. The mode is fixed at creation and
 	// recorded in stream metadata; it cannot be toggled by a later update.
-	// Defaults to false, in which case the store behaves exactly as today.
 	Tenancy bool
 }
 
-// streamMetadata merges the tenancy marker into the user-supplied metadata
-// without mutating the caller's map. Returns the caller's map untouched for
-// untenanted stores so existing streams are byte-identical.
+// streamMetadata adds the reserved tenancy marker to the user-supplied metadata
+// for a tenant store. Untenanted stores are returned untouched so existing
+// streams stay byte-identical.
 func streamMetadata(config EventStoreConfig) map[string]string {
 	if !config.Tenancy {
 		return config.Metadata
 	}
-	md := make(map[string]string, len(config.Metadata)+1)
-	for k, v := range config.Metadata {
-		md[k] = v
+	md := config.Metadata
+	if md == nil {
+		md = make(map[string]string, 1)
 	}
 	md[tenantMetaKey] = tenantMetaVal
 	return md

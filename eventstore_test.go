@@ -845,3 +845,29 @@ func TestSubjectsToFilters(t *testing.T) {
 		})
 	}
 }
+
+// TestEntityValidation pins that an entity is exactly two subject tokens and
+// that neither token may smuggle in a wildcard or whitespace. This matters
+// because the entity is interpolated straight into the published subject: a '*'
+// or '>' would turn a concrete subject into a wildcard, and whitespace is an
+// invalid token NATS would reject downstream with a far less obvious error.
+func TestEntityValidation(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	for _, good := range []string{"order.1", "order-type.abc123", "a.b"} {
+		is.True(entityRegex.MatchString(good))
+	}
+
+	for _, bad := range []string{
+		"order",     // one token
+		"a.b.c",     // three tokens
+		"order.",    // empty id
+		".1",        // empty type
+		"order.*",   // wildcard token
+		"order.>",   // wildcard token
+		"order *.1", // whitespace
+		"order.\t1", // whitespace
+	} {
+		is.True(!entityRegex.MatchString(bad))
+	}
+}
