@@ -137,6 +137,12 @@ func TestTenantStoreEnforcement(t *testing.T) {
 	_, err = es.CreateReactor(ctx, ReactorConfig{Name: "r", Filters: []string{"*.*.order-placed"}})
 	is.Err(err, ErrTenantRequired)
 
+	_, err = es.UpdateReactor(ctx, ReactorConfig{Name: "r", Filters: []string{"*.*.order-placed"}})
+	is.Err(err, ErrTenantRequired)
+
+	_, err = es.CreateOrUpdateReactor(ctx, ReactorConfig{Name: "r", Filters: []string{"*.*.order-placed"}})
+	is.Err(err, ErrTenantRequired)
+
 	err = es.DeleteReactor(ctx, "r")
 	is.Err(err, ErrTenantRequired)
 

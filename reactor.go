@@ -275,9 +275,12 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (Reactor, erro
 //
 // Tenant scope: listing is stream-global and is NOT filtered to the calling
 // handle's tenant. On a tenant store the result includes durables created under
-// every tenant; each ReactorInfo.Config.Filters reflects the durable's own
-// tenant-scoped subjects. See GetReactor for the rationale and the caller's
-// namespacing responsibility.
+// every tenant. Each ReactorInfo.Config.Filters is decoded by stripping the
+// calling handle's tenant prefix, so the format is mixed within a single call:
+// a durable belonging to the calling tenant comes back in user form
+// ("*.*.order-shipped"), while a durable from another tenant does not match the
+// prefix and is surfaced verbatim ("$ES.<name>.<other-tenant>.*.*.order-shipped").
+// See GetReactor for the rationale and the caller's namespacing responsibility.
 func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
 	stream, err := s.js.Stream(ctx, s.streamName())
 	if err != nil {
