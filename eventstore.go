@@ -129,6 +129,11 @@ func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
 // fully-qualified JetStream subjects, returning the original filter patterns.
 // Subjects that don't carry the prefix are surfaced verbatim (e.g. consumers
 // created outside Rita).
+//
+// On a tenant handle it inverts filtersToSubjects' empty-filter default: a
+// decoded set of exactly the tenant-wide pattern ("*.*.*") collapses back to
+// empty, so a reactor created with no filters round-trips to no filters rather
+// than appearing to carry an explicit one.
 func (s *EventStore) subjectsToFilters(subjects []string) []string {
 	prefix := s.subjectPrefix("")
 	filters := make([]string, 0, len(subjects))
@@ -138,6 +143,9 @@ func (s *EventStore) subjectsToFilters(subjects []string) []string {
 		} else {
 			filters = append(filters, fs)
 		}
+	}
+	if s.tenant != "" && len(filters) == 1 && filters[0] == "*.*.*" {
+		return nil
 	}
 	return filters
 }

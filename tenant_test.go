@@ -57,6 +57,14 @@ func TestSubjectsToFiltersTenantScoped(t *testing.T) {
 
 	got := ten.subjectsToFilters([]string{"$ES.demo.acme.*.*.order-shipped"})
 	is.Equal(got, []string{"*.*.order-shipped"})
+
+	// The tenant-wide pattern collapses back to empty, inverting the empty-filter
+	// default so a reactor created with no filters round-trips to no filters
+	// rather than appearing to carry an explicit "*.*.*".
+	roundTrip, err := ten.filtersToSubjects(nil)
+	is.NoErr(err)
+	is.Equal(roundTrip, []string{"$ES.demo.acme.*.*.*"})
+	is.Equal(ten.subjectsToFilters(roundTrip), []string(nil))
 }
 
 // TestTenantValidation pins the charset rules and mode guard on Tenant().
