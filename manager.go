@@ -101,19 +101,15 @@ type EventStoreConfig struct {
 	Tenancy bool
 }
 
-// streamMetadata adds the reserved tenancy marker to the user-supplied metadata
-// for a tenant store. Untenanted stores are returned untouched so existing
-// streams stay byte-identical.
-func streamMetadata(config EventStoreConfig) map[string]string {
-	if !config.Tenancy {
-		return config.Metadata
+// streamMetadata augments the given metadata with the reserved tenancy marker,
+// allocating the map if it is nil. Callers invoke it only for tenant stores, so
+// untenanted streams keep their metadata untouched and stay byte-identical.
+func streamMetadata(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
 	}
-	md := config.Metadata
-	if md == nil {
-		md = make(map[string]string, 1)
-	}
-	md[tenantMetaKey] = tenantMetaVal
-	return md
+	metadata[tenantMetaKey] = tenantMetaVal
+	return metadata
 }
 
 // Manager creates and manages EventStore instances. It provides shared
@@ -163,10 +159,15 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 		return nil, ErrEventStoreNameRequired
 	}
 
+	metadata := config.Metadata
+	if config.Tenancy {
+		metadata = streamMetadata(metadata)
+	}
+
 	jsc := &jetstream.StreamConfig{
 		Name:               fmt.Sprintf(eventStoreNameTmpl, config.Name),
 		Description:        config.Description,
-		Metadata:           streamMetadata(config),
+		Metadata:           metadata,
 		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
 		Replicas:           config.Replicas,
 		Storage:            config.Storage,
@@ -213,10 +214,15 @@ func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig)
 	}
 	_, config.Tenancy = str.CachedInfo().Config.Metadata[tenantMetaKey]
 
+	metadata := config.Metadata
+	if config.Tenancy {
+		metadata = streamMetadata(metadata)
+	}
+
 	jsc := &jetstream.StreamConfig{
 		Name:               sname,
 		Description:        config.Description,
-		Metadata:           streamMetadata(config),
+		Metadata:           metadata,
 		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
 		Replicas:           config.Replicas,
 		Storage:            config.Storage,
