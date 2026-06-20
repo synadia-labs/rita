@@ -871,3 +871,34 @@ func TestEntityValidation(t *testing.T) {
 		is.True(!entityRegex.MatchString(bad))
 	}
 }
+
+// TestUpdateMergesCustomMetadata pins that an update preserves custom metadata
+// keys set by an earlier create even when it does not re-supply them. JetStream
+// replaces a stream's metadata wholesale, so without the merge a caller would
+// have to echo every prior key on every update or silently lose it.
+func TestUpdateMergesCustomMetadata(t *testing.T) {
+	is := testutil.NewIs(t)
+	m, ctx := tenantTestManager(t)
+
+	_, err := m.CreateEventStore(ctx, EventStoreConfig{
+		Name:     "meta",
+		Metadata: map[string]string{"team": "platform", "tier": "gold"},
+	})
+	is.NoErr(err)
+
+	// Update touches a different field and re-supplies only one key (changed),
+	// plus a new key. The omitted "tier" must survive.
+	err = m.UpdateEventStore(ctx, EventStoreConfig{
+		Name:        "meta",
+		Description: "updated",
+		Metadata:    map[string]string{"team": "infra", "region": "us-east"},
+	})
+	is.NoErr(err)
+
+	str, err := m.js.Stream(ctx, "ES_meta")
+	is.NoErr(err)
+	md := str.CachedInfo().Config.Metadata
+	is.Equal(md["team"], "infra")     // re-supplied: overridden
+	is.Equal(md["tier"], "gold")      // omitted: preserved
+	is.Equal(md["region"], "us-east") // new: added
+}

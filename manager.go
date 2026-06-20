@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -22,6 +24,12 @@ const (
 	// is a minimal non-empty marker. The mode is fixed at creation and never toggled.
 	tenantMetaKey = "rita.tenant"
 	tenantMetaVal = "1"
+
+	// natsMetaPrefix marks metadata keys the NATS server manages itself (stream
+	// API level, server version). They appear on reads but must not be supplied
+	// on writes — the server re-derives them — so a merge drops them rather than
+	// echoing a stale snapshot back.
+	natsMetaPrefix = "_nats."
 )
 
 type managerOption func(o *Manager) error
@@ -110,6 +118,28 @@ func streamMetadata(metadata map[string]string) map[string]string {
 	}
 	metadata[tenantMetaKey] = tenantMetaVal
 	return metadata
+}
+
+// mergeStreamMetadata overlays the user-supplied metadata onto the metadata
+// already stored on the stream. JetStream replaces a stream's metadata wholesale
+// on update, so without this a caller that does not re-supply a custom key set by
+// an earlier create or update would silently drop it. User-supplied keys win on
+// conflict; server-managed natsMetaPrefix keys are dropped so the server can
+// re-derive them. Returns nil when the result is empty so metadata-free streams
+// stay byte-identical.
+func mergeStreamMetadata(existing, supplied map[string]string) map[string]string {
+	merged := make(map[string]string, len(existing)+len(supplied))
+	for k, v := range existing {
+		if strings.HasPrefix(k, natsMetaPrefix) {
+			continue
+		}
+		merged[k] = v
+	}
+	maps.Copy(merged, supplied)
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 // Manager creates and manages EventStore instances. It provides shared
@@ -202,6 +232,11 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 // Update updates the event store configuration. Tenancy is immutable: the
 // existing stream's mode is preserved regardless of config.Tenancy, so an
 // update that forgets to set it cannot silently demote a tenant store.
+//
+// Custom Metadata is merged with the stream's existing metadata rather than
+// replacing it: keys present in config.Metadata are written (overriding any
+// prior value) and keys omitted are preserved. Removing a key is therefore not
+// expressible through Update today.
 func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig) error {
 	if config.Name == "" {
 		return ErrEventStoreNameRequired
@@ -212,9 +247,12 @@ func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig)
 	if err != nil {
 		return err
 	}
-	_, config.Tenancy = str.CachedInfo().Config.Metadata[tenantMetaKey]
+	existing := str.CachedInfo().Config.Metadata
+	_, config.Tenancy = existing[tenantMetaKey]
 
-	metadata := config.Metadata
+	// Preserve custom metadata set by earlier creates/updates: JetStream replaces
+	// metadata wholesale, so an update that omits a key would otherwise drop it.
+	metadata := mergeStreamMetadata(existing, config.Metadata)
 	if config.Tenancy {
 		metadata = streamMetadata(metadata)
 	}
