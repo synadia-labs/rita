@@ -39,6 +39,9 @@ var (
 	ErrNoEvents               = errors.New("rita: no events provided")
 	ErrEventStoreNameRequired = errors.New("rita: event store name is required")
 	ErrSubjectTooManyTokens   = errors.New("rita: subject can have at most three tokens")
+	ErrTenantInvalid          = errors.New("rita: tenant invalid")
+	ErrTenantNotSupported     = errors.New("rita: store is not tenant-enabled")
+	ErrTenantRequired         = errors.New("rita: store requires a tenant scope")
 
 	// isSequenceConflict checks if the error is a JetStream wrong last sequence error.
 	isSequenceConflict = func(err error) bool {
@@ -49,10 +52,18 @@ var (
 		return false
 	}
 
-	// Entity regex: <entity-type>.<entity-id>. Note this is just a basic validation
-	// to ensure there are two tokens separated by a dot. Invalid characters will be
-	// caught by NATS server when publishing.
-	entityRegex = regexp.MustCompile(`^[^.]+\.[^.]+$`)
+	// subjectToken matches a single NATS subject token: one or more characters
+	// that are not the token separator '.', a wildcard ('*' or '>'), or
+	// whitespace. These are the characters NATS does not allow inside a token, so
+	// rejecting them here stops an invalid entity or tenant from injecting extra
+	// tokens or wildcards into a subject.
+	subjectToken = `[^.*>\s]+`
+
+	// Entity regex: <entity-type>.<entity-id> — two subject tokens joined by a dot.
+	entityRegex = regexp.MustCompile(`^` + subjectToken + `\.` + subjectToken + `$`)
+
+	// Tenant regex: a single subject token.
+	tenantRegex = regexp.MustCompile(`^` + subjectToken + `$`)
 )
 
 // parsePattern parses a subject pattern into the full form with exactly three tokens.
@@ -76,9 +87,16 @@ func parsePattern(subject string) (string, error) {
 	return strings.Join(toks, "."), nil
 }
 
-// subjectPrefix returns the subject prefix for this EventStore combined with the given pattern.
+// subjectPrefix returns the subject prefix for this EventStore combined with the
+// given pattern. When the handle is tenant-scoped, the tenant token is inserted
+// between the store name and the pattern; otherwise the result is byte-identical
+// to the untenanted form "$ES.<name>.<pattern>".
 func (s *EventStore) subjectPrefix(pattern string) string {
-	return fmt.Sprintf(eventStoreSubjectTmpl, s.name) + pattern
+	base := fmt.Sprintf(eventStoreSubjectTmpl, s.name)
+	if s.tenant != "" {
+		base += s.tenant + "."
+	}
+	return base + pattern
 }
 
 // streamName returns the JetStream stream name backing this EventStore.
@@ -89,6 +107,13 @@ func (s *EventStore) streamName() string {
 // filtersToSubjects expands user-supplied filter patterns to fully-qualified
 // JetStream subjects scoped to this store.
 func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
+	// A tenant-scoped handle with no explicit filters must still be confined to
+	// its tenant, so default to the tenant's full pattern ("*.*.*") rather than
+	// the whole stream. Untenanted stores keep the historical "no filters means
+	// whole stream" behavior (empty FilterSubjects).
+	if len(filters) == 0 && s.tenant != "" {
+		filters = []string{"*.*.*"}
+	}
 	subjects := make([]string, len(filters))
 	for i, p := range filters {
 		pp, err := parsePattern(p)
@@ -104,6 +129,11 @@ func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
 // fully-qualified JetStream subjects, returning the original filter patterns.
 // Subjects that don't carry the prefix are surfaced verbatim (e.g. consumers
 // created outside Rita).
+//
+// On a tenant handle it inverts filtersToSubjects' empty-filter default: a
+// decoded set of exactly the tenant-wide pattern ("*.*.*") collapses back to
+// empty, so a reactor created with no filters round-trips to no filters rather
+// than appearing to carry an explicit one.
 func (s *EventStore) subjectsToFilters(subjects []string) []string {
 	prefix := s.subjectPrefix("")
 	filters := make([]string, 0, len(subjects))
@@ -113,6 +143,9 @@ func (s *EventStore) subjectsToFilters(subjects []string) []string {
 		} else {
 			filters = append(filters, fs)
 		}
+	}
+	if s.tenant != "" && len(filters) == 1 && filters[0] == "*.*.*" {
+		return nil
 	}
 	return filters
 }
@@ -240,6 +273,13 @@ func WithNoWait() WatchOption {
 type EventStore struct {
 	name string
 
+	// tenant is the active tenant scope for this handle. Empty means unscoped:
+	// on a tenant store the store-building operations return ErrTenantRequired;
+	// on an untenanted store it is always empty.
+	tenant string
+	// tenantMode is true when the backing store was created with Tenancy enabled.
+	tenantMode bool
+
 	nc *nats.Conn
 	js jetstream.JetStream
 
@@ -247,6 +287,35 @@ type EventStore struct {
 	clock  clock.Clock
 	types  *types.Registry
 	logger *slog.Logger
+}
+
+// Tenant returns a derived handle scoped to the given tenant. The receiver is
+// left unchanged, so scopes are immutable and cheap to derive. Re-scoping
+// replaces rather than nests: es.Tenant("a").Tenant("b") is tenant "b".
+//
+// Tenant returns ErrTenantNotSupported if the store was not created with
+// Tenancy enabled, and ErrTenantInvalid if the token is empty or contains
+// '.', '*', '>', or whitespace.
+func (s *EventStore) Tenant(tenant string) (*EventStore, error) {
+	if !s.tenantMode {
+		return nil, ErrTenantNotSupported
+	}
+	if !tenantRegex.MatchString(tenant) {
+		return nil, ErrTenantInvalid
+	}
+	clone := *s
+	clone.tenant = tenant
+	return &clone, nil
+}
+
+// requireTenant guards store-building operations: on a tenant store a concrete
+// tenant scope is mandatory so events are published to — and read from — a
+// single tenant. It is a no-op on untenanted stores.
+func (s *EventStore) requireTenant() error {
+	if s.tenantMode && s.tenant == "" {
+		return ErrTenantRequired
+	}
+	return nil
 }
 
 // wrapEvent validates and enriches an event with defaults. It ensures the event has
@@ -410,6 +479,12 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 // Decide is a convenience method that combines a model's Decide invocation
 // followed by an Append. If either step fails, an error is returned.
 func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([]*Event, uint64, error) {
+	// Guard before invoking the model so an unscoped handle cannot run the
+	// decider's side effects only to fail at Append (which re-checks).
+	if err := s.requireTenant(); err != nil {
+		return nil, 0, err
+	}
+
 	events, err := model.Decide(ctx, cmd)
 	if err != nil {
 		return nil, 0, err
@@ -430,6 +505,12 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([
 // prior to the failure. Recovery is to call Evolve with WithAfterSequence to
 // replay the remaining events.
 func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
+	// Guard before invoking the model so an unscoped handle cannot run the
+	// decider's side effects only to fail at Append (which re-checks).
+	if err := s.requireTenant(); err != nil {
+		return nil, 0, err
+	}
+
 	events, err := model.Decide(ctx, cmd)
 	if err != nil {
 		return nil, 0, err
@@ -486,6 +567,10 @@ func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream
 // only events of that specific type for that specific entity will be loaded.
 // Wildcards can be used as well.
 func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
+	if err := s.requireTenant(); err != nil {
+		return 0, err
+	}
+
 	var o options
 	for _, opt := range opts {
 		if err := opt.setOpt(&o); err != nil {
@@ -575,6 +660,9 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 	if len(events) == 0 {
 		return 0, ErrNoEvents
 	}
+	if err := s.requireTenant(); err != nil {
+		return 0, err
+	}
 
 	// Prepare messages.
 	var msgs []*nats.Msg
@@ -585,7 +673,7 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 			return 0, err
 		}
 
-		subject := eventSubject(s.name, e)
+		subject := s.eventSubject(e)
 		msg, err := s.packEvent(subject, e)
 		if err != nil {
 			return 0, err
@@ -640,6 +728,10 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 // Since this will update the Evolver asynchronously, the Evolver implementation must be
 // thread-safe. Use the `NewModel()` helper to create a thread-safe model.
 func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOption) (Watcher, error) {
+	if err := s.requireTenant(); err != nil {
+		return nil, err
+	}
+
 	var o options
 	for _, opt := range opts {
 		if err := opt.setOpt(&o); err != nil {

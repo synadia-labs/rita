@@ -845,3 +845,60 @@ func TestSubjectsToFilters(t *testing.T) {
 		})
 	}
 }
+
+// TestEntityValidation pins that an entity is exactly two subject tokens and
+// that neither token may smuggle in a wildcard or whitespace. This matters
+// because the entity is interpolated straight into the published subject: a '*'
+// or '>' would turn a concrete subject into a wildcard, and whitespace is an
+// invalid token NATS would reject downstream with a far less obvious error.
+func TestEntityValidation(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	for _, good := range []string{"order.1", "order-type.abc123", "a.b"} {
+		is.True(entityRegex.MatchString(good))
+	}
+
+	for _, bad := range []string{
+		"order",     // one token
+		"a.b.c",     // three tokens
+		"order.",    // empty id
+		".1",        // empty type
+		"order.*",   // wildcard token
+		"order.>",   // wildcard token
+		"order *.1", // whitespace
+		"order.\t1", // whitespace
+	} {
+		is.True(!entityRegex.MatchString(bad))
+	}
+}
+
+// TestUpdateMergesCustomMetadata pins that an update preserves custom metadata
+// keys set by an earlier create even when it does not re-supply them. JetStream
+// replaces a stream's metadata wholesale, so without the merge a caller would
+// have to echo every prior key on every update or silently lose it.
+func TestUpdateMergesCustomMetadata(t *testing.T) {
+	is := testutil.NewIs(t)
+	m, ctx := tenantTestManager(t)
+
+	_, err := m.CreateEventStore(ctx, EventStoreConfig{
+		Name:     "meta",
+		Metadata: map[string]string{"team": "platform", "tier": "gold"},
+	})
+	is.NoErr(err)
+
+	// Update touches a different field and re-supplies only one key (changed),
+	// plus a new key. The omitted "tier" must survive.
+	err = m.UpdateEventStore(ctx, EventStoreConfig{
+		Name:        "meta",
+		Description: "updated",
+		Metadata:    map[string]string{"team": "infra", "region": "us-east"},
+	})
+	is.NoErr(err)
+
+	str, err := m.js.Stream(ctx, "ES_meta")
+	is.NoErr(err)
+	md := str.CachedInfo().Config.Metadata
+	is.Equal(md["team"], "infra")     // re-supplied: overridden
+	is.Equal(md["tier"], "gold")      // omitted: preserved
+	is.Equal(md["region"], "us-east") // new: added
+}
