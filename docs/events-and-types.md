@@ -91,8 +91,9 @@ optional dotted segments). `NewRegistry` validates every type up front — that
 `Init` returns a non-nil pointer to a struct and that a value round-trips
 through the codec — so misconfiguration fails at startup, not at runtime.
 
-The same registry is used for both [commands](./deciders-and-evolvers.md#commands)
-and events.
+The registry serializes events; command payload types do not need to be
+registered, since [commands](./deciders-and-evolvers.md#commands) are never
+serialized.
 
 ### Validation
 

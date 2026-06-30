@@ -68,14 +68,16 @@ type Command struct {
 	ID   string
 	Time time.Time
 	Type string
-	Data any               // a registered type, or []byte
+	Data any               // your command payload
 	Meta map[string]string
 }
 ```
 
-Commands and events share the same [type registry](./events-and-types.md#the-type-registry).
-The crucial distinction is intent: a command is a request ("place this order")
-that may fail; an event is a fact ("order was placed") that already happened and
+Unlike an event, a command is never serialized: `EventStore.Decide` hands the
+`*Command` straight to your model, so its payload type does not need to be
+registered in the [type registry](./events-and-types.md#the-type-registry). The
+crucial distinction is intent: a command is a request ("place this order") that
+may fail; an event is a fact ("order was placed") that already happened and
 cannot fail.
 
 ## Append

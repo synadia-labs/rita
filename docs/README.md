@@ -162,5 +162,5 @@ names.
 | **Viewer** | Read-only access to a model's state. |
 | **Model[T]** | Thread-safe combinator of Decider/Evolver/Viewer with sequence tracking. |
 | **Reactor** | A durable consumer that runs side effects per event. |
-| **Type registry** | Maps event/command type names to Go structs and a codec. |
+| **Type registry** | Maps event type names to Go structs and a codec. |
 | **Tenant** | An isolated subject scope within a single tenant-enabled store. |
