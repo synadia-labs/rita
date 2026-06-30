@@ -80,6 +80,11 @@ cannot fail.
 
 ## Append
 
+`Append`, `Decide`, and `DecideAndEvolve` below are methods on the `EventStore` —
+the store's write side. They orchestrate the model you defined above (calling its
+`Decider.Decide` and `Evolver.Evolve`), so note the overlapping names:
+`EventStore.Decide` is a store method, distinct from your model's `Decider.Decide`.
+
 The lowest-level write is `Append`. It validates and enriches each event (see
 [the event](./events-and-types.md#the-event)), publishes them, and returns the
 stream sequence of the last one:
@@ -98,8 +103,8 @@ slice returns `ErrNoEvents`.
 
 ## Decide
 
-`Decide` is a convenience that runs a model's `Decide` and then `Append`s the
-resulting events in one call:
+`EventStore.Decide` is a convenience that runs your model's `Decider.Decide` and
+then `Append`s the resulting events in one call:
 
 ```go
 events, seq, err := es.Decide(ctx, model, &rita.Command{Data: &PlaceOrder{}})

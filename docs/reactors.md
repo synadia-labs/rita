@@ -23,8 +23,8 @@ and you resume where you left off.
 
 ## A minimal reactor
 
-A reactor is mostly its handler — the function that decides each event's fate.
-The return value is the entire contract (detailed [below](#handler-return-semantics)):
+A reactor is mostly its handler — the function that decides what happens to each
+event. The return value is the entire contract (detailed [below](#handler-return-semantics)):
 
 ```go
 handler := func(ctx context.Context, ev *rita.Event) error {

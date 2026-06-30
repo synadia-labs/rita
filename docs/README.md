@@ -78,9 +78,9 @@ Rita has a small surface area built around a few collaborating pieces.
                        └──────────┘            └─────┬──────┘          └──────────┘
                                                      │
                                        Watch ────────┤──────── Reactor
-                                  (in-process views)  │   (durable side effects)
-                                                      ▼
-                                                external systems
+                                  (in-process views) │   (durable side effects)
+                                                     ▼
+                                             external systems
 ```
 
 - A [**Manager**](./event-stores.md) holds shared dependencies (a type

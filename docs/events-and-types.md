@@ -109,6 +109,12 @@ func (o *OrderPlaced) Validate() error {
 }
 ```
 
+`Validate()` runs on the write path only, when the codec marshals an event during
+`Append`. Commands are never serialized — `EventStore.Decide` hands the
+`*Command` straight to your model — so a command type's `Validate()` is **not**
+called automatically. Validate a command inside your `Decide` method (or before
+calling it) if you need that check.
+
 ## Codecs
 
 Rita ships four codecs, registered by name in the [`codec`](../codec) package:
