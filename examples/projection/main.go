@@ -113,8 +113,11 @@ func run() error {
 		}); err != nil {
 			return err
 		}
-		if done || time.Now().After(deadline) {
+		if done {
 			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("projection did not catch up within deadline")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

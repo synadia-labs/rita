@@ -25,7 +25,7 @@ lastSeq, err := es.Evolve(ctx, &order, rita.WithFilters("order.1001"))
 
 It builds an ephemeral consumer, applies exactly the currently-pending events,
 then tears the consumer down. It is a one-shot, synchronous catch-up: when it
-returns, `stats` reflects every event in scope at the moment the call started.
+returns, `order` reflects every event in scope at the moment the call started.
 If nothing matches, it returns `0` and leaves the model untouched.
 
 Use `Evolve` for request/response work: load an entity's state, make a decision,
@@ -64,7 +64,7 @@ is current before the call returns.
 
 > **Full example:** [`examples/projection/main.go`](../examples/projection/main.go) —
 > the `Stats` read model is lines 25–39, starting the watch is 91–96, and reading
-> the live projection through `View` is 106–125.
+> the live projection through `View` is 106–128.
 
 Watch-specific options:
 

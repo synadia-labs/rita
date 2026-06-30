@@ -126,8 +126,8 @@ requests: each command advances both the stored log and the live model in lock
 step.
 
 > **Full example:** [`examples/deciders/main.go`](../examples/deciders/main.go) —
-> `NewModel` and the `DecideAndEvolve` command loop are lines 113–120, `View` is
-> 122–128, and a rejected decision is 130–134.
+> `NewModel` and the `DecideAndEvolve` command loop are lines 114–121, `View` is
+> 123–129, and a rejected decision is 131–135.
 
 > **Partial-failure note.** If the evolve step fails *after* the append
 > succeeded (including a context cancellation between events), the events are

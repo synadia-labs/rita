@@ -86,9 +86,10 @@ func run() error {
 	}
 	defer nc.Close()
 
+	// Only events are registered: events are serialized to and from the log,
+	// commands never are. EventStore.Decide passes the *Command straight to the
+	// model, so registering command types would wrongly imply they are stored.
 	registry, err := types.NewRegistry(map[string]*types.Type{
-		"place-order":   {Init: func() any { return &PlaceOrder{} }},
-		"ship-order":    {Init: func() any { return &ShipOrder{} }},
 		"order-placed":  {Init: func() any { return &OrderPlaced{} }},
 		"order-shipped": {Init: func() any { return &OrderShipped{} }},
 	})
