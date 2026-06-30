@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -241,19 +242,27 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 // Durable consumers created outside Rita are visible; there is no Rita-specific
 // marker to distinguish them.
 //
-// Tenant scope: lookup is stream-global by durable name and is NOT tenant-filtered,
-// even on a tenant store. The mutating reactor operations (Create/Update/
-// CreateOrUpdate/Delete) require a tenant scope so they build correctly scoped
-// filter subjects, but durable names share a single stream-wide namespace. Callers
-// that need per-tenant reactor isolation should namespace durable names per tenant
-// (e.g. "<tenant>-<name>"); library-side namespacing is a possible future addition.
+// Tenant scope: on a tenant-scoped handle (es.Tenant("acme")) only reactors
+// belonging to that tenant are visible — one whose filter subjects are not
+// confined to the tenant's subject prefix returns ErrReactorNotFound, even if a
+// durable by that name exists for another tenant. An unscoped handle sees every
+// reactor on the stream. Durable names still share one stream-wide namespace, so
+// distinct tenants must still give their reactors distinct names.
 //
-// Returns ErrReactorNotFound if no durable with this name exists.
+// Returns ErrReactorNotFound if no durable with this name exists, or if it exists
+// but falls outside this handle's tenant scope.
 func (s *EventStore) GetReactor(ctx context.Context, name string) (Reactor, error) {
 	if name == "" {
 		return nil, ErrReactorNameRequired
 	}
-	return s.newReactorHandle(ctx, name)
+	handle, err := s.newReactorHandle(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !s.reactorInTenantScope(handle.cons.CachedInfo().Config.FilterSubjects) {
+		return nil, ErrReactorNotFound
+	}
+	return handle, nil
 }
 
 // ListReactors returns durable consumers on the stream backing this EventStore.
@@ -261,14 +270,14 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (Reactor, erro
 // are excluded. Durable consumers created outside Rita are included: the filter
 // is on whether the consumer has a Durable name, not on any Rita-specific marker.
 //
-// Tenant scope: listing is stream-global and is NOT filtered to the calling
-// handle's tenant. On a tenant store the result includes durables created under
-// every tenant. Each ReactorInfo.Config.Filters is decoded by stripping the
-// calling handle's tenant prefix, so the format is mixed within a single call:
-// a durable belonging to the calling tenant comes back in user form
-// ("*.*.order-shipped"), while a durable from another tenant does not match the
-// prefix and is surfaced verbatim ("$ES.<name>.<other-tenant>.*.*.order-shipped").
-// See GetReactor for the rationale and the caller's namespacing responsibility.
+// Tenant scope: on a tenant-scoped handle (es.Tenant("acme")) the result is
+// limited to reactors belonging to that tenant — those whose filter subjects are
+// confined to the tenant's subject prefix. Their ReactorInfo.Config.Filters come
+// back in user form ("*.*.order-shipped") with the tenant prefix stripped. An
+// unscoped handle lists every durable on the stream across all tenants. Reactors
+// with no filters or filters spanning more than one tenant (e.g. consumers
+// created outside Rita) are not claimed by any tenant and appear only in the
+// unscoped listing.
 func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
 	stream, err := s.js.Stream(ctx, s.stream)
 	if err != nil {
@@ -280,12 +289,38 @@ func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
 		if info.Config.Durable == "" {
 			continue
 		}
+		if !s.reactorInTenantScope(info.Config.FilterSubjects) {
+			continue
+		}
 		out = append(out, s.reactorInfoFromJS(info))
 	}
 	if err := lister.Err(); err != nil {
 		return nil, fmt.Errorf("rita: list reactors: %w", err)
 	}
 	return out, nil
+}
+
+// reactorInTenantScope reports whether a durable with the given filter subjects
+// belongs to this handle's tenant. An unscoped handle (s.tenant == "") scopes
+// nothing and sees every reactor. On a tenant-scoped handle a reactor is in scope
+// only when all of its filter subjects sit under the tenant's subject prefix —
+// exactly how Create/Update build them. A reactor with no filters, or filters
+// spanning another tenant (e.g. a consumer created outside Rita), is not claimed
+// by any tenant and is visible only through an unscoped handle.
+func (s *EventStore) reactorInTenantScope(filterSubjects []string) bool {
+	if s.tenant == "" {
+		return true
+	}
+	if len(filterSubjects) == 0 {
+		return false
+	}
+	prefix := s.subjectPrefix("")
+	for _, fs := range filterSubjects {
+		if !strings.HasPrefix(fs, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *EventStore) reactorInfoFromJS(info *jetstream.ConsumerInfo) *ReactorInfo {

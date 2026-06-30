@@ -1,6 +1,7 @@
 package rita
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/synadia-labs/rita/testutil"
@@ -256,4 +257,61 @@ func TestTenantReactorRoundTrip(t *testing.T) {
 	// A scoped handle can delete its reactor.
 	err = acme.DeleteReactor(ctx, "shipper")
 	is.NoErr(err)
+}
+
+// TestTenantReactorLookupScoped verifies that reactor lookups are tenant-scoped:
+// a scoped handle sees only its own reactors and cannot fetch another tenant's,
+// while the unscoped handle sees every reactor across tenants. This is the
+// isolation that lets each tenant manage its reactors without observing or
+// fetching durables belonging to other tenants.
+func TestTenantReactorLookupScoped(t *testing.T) {
+	is := testutil.NewIs(t)
+	m, ctx := newTestManager(t)
+
+	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "rlookup", Tenancy: true})
+	is.NoErr(err)
+
+	acme, err := es.Tenant("acme")
+	is.NoErr(err)
+	beta, err := es.Tenant("beta")
+	is.NoErr(err)
+
+	_, err = acme.CreateReactor(ctx, ReactorConfig{Name: "acme-shipper", Filters: []string{"*.*.order-shipped"}})
+	is.NoErr(err)
+	_, err = beta.CreateReactor(ctx, ReactorConfig{Name: "beta-shipper", Filters: []string{"*.*.order-shipped"}})
+	is.NoErr(err)
+
+	// Each scoped handle lists only its own reactor.
+	acmeList, err := acme.ListReactors(ctx)
+	is.NoErr(err)
+	is.Equal(reactorNames(acmeList), []string{"acme-shipper"})
+
+	betaList, err := beta.ListReactors(ctx)
+	is.NoErr(err)
+	is.Equal(reactorNames(betaList), []string{"beta-shipper"})
+
+	// The unscoped handle sees both, across tenants.
+	allList, err := es.ListReactors(ctx)
+	is.NoErr(err)
+	names := reactorNames(allList)
+	sort.Strings(names)
+	is.Equal(names, []string{"acme-shipper", "beta-shipper"})
+
+	// GetReactor is invisible across tenants, but works within scope and unscoped.
+	_, err = acme.GetReactor(ctx, "beta-shipper")
+	is.Err(err, ErrReactorNotFound)
+
+	_, err = acme.GetReactor(ctx, "acme-shipper")
+	is.NoErr(err)
+
+	_, err = es.GetReactor(ctx, "beta-shipper")
+	is.NoErr(err)
+}
+
+func reactorNames(rs []*ReactorInfo) []string {
+	names := make([]string, len(rs))
+	for i, r := range rs {
+		names[i] = r.Name
+	}
+	return names
 }
