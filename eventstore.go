@@ -162,9 +162,11 @@ type options struct {
 	errHandler func(error, *Event, jetstream.Msg)
 }
 
-type evolveOptFn func(o *options) error
+// optionFunc is the single adapter behind every option constructor. It
+// satisfies EvolveOption and WatchOption, which share the same method set.
+type optionFunc func(o *options) error
 
-func (f evolveOptFn) setOpt(o *options) error {
+func (f optionFunc) setOpt(o *options) error {
 	return f(o)
 }
 
@@ -179,7 +181,7 @@ type EvolveOption interface {
 // to be fetched.
 // This can be passed in `Evolve` and `Watch`.
 func WithAfterSequence(seq uint64) EvolveOption {
-	return evolveOptFn(func(o *options) error {
+	return optionFunc(func(o *options) error {
 		o.afterSeq = &seq
 		return nil
 	})
@@ -188,7 +190,7 @@ func WithAfterSequence(seq uint64) EvolveOption {
 // WithStopSequence specifies the sequence of the last event that should be fetched.
 // This is useful to control how much replay is performed when evolving a state.
 func WithStopSequence(seq uint64) EvolveOption {
-	return evolveOptFn(func(o *options) error {
+	return optionFunc(func(o *options) error {
 		o.stopSeq = &seq
 		return nil
 	})
@@ -201,22 +203,16 @@ type FilterOption interface {
 	EvolveOption
 }
 
-type filtersOption struct {
-	filters []string
-}
-
-func (f filtersOption) setOpt(o *options) error {
-	o.filters = f.filters
-	return nil
-}
-
 // WithFilters specifies the subject filter to use when evolving state or
 // watching. The filter can be in the form of `<entity-type>`,
 // `<entity-type>.<entity-id>`, or `<entity-type>.<entity-id>.<event-type>`.
 // Wildcards can be used as well at any token position. For reactors, set
 // filters on ReactorConfig.Filters at Create/Update time.
 func WithFilters(filters ...string) FilterOption {
-	return filtersOption{filters: filters}
+	return optionFunc(func(o *options) error {
+		o.filters = filters
+		return nil
+	})
 }
 
 // Watcher represents an active event subscription. Call Stop to
@@ -242,15 +238,9 @@ type WatchOption interface {
 	setOpt(*options) error
 }
 
-type watchOptFn func(o *options) error
-
-func (f watchOptFn) setOpt(o *options) error {
-	return f(o)
-}
-
 // WithErrHandler sets the error handler function for the watcher.
 func WithErrHandler(fn func(error, *Event, jetstream.Msg)) WatchOption {
-	return watchOptFn(func(o *options) error {
+	return optionFunc(func(o *options) error {
 		o.errHandler = fn
 		return nil
 	})
@@ -258,7 +248,7 @@ func WithErrHandler(fn func(error, *Event, jetstream.Msg)) WatchOption {
 
 // WithNoWait configures the watcher to not wait for catch-up before returning.
 func WithNoWait() WatchOption {
-	return watchOptFn(func(o *options) error {
+	return optionFunc(func(o *options) error {
 		o.noWait = true
 		return nil
 	})
