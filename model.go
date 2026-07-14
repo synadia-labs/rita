@@ -3,7 +3,6 @@ package rita
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"time"
 )
@@ -128,65 +127,6 @@ type DeciderEvolver interface {
 	Evolver
 }
 
-type entityMap struct {
-	sseq map[string]map[string]uint64
-	lseq map[string]map[string]uint64
-}
-
-func (em *entityMap) get(entity string, m map[string]map[string]uint64) uint64 {
-	idx := strings.IndexByte(entity, '.')
-	if idx < 0 {
-		return 0
-	}
-
-	pattern := entity[:idx]
-	id := entity[idx+1:]
-	if pm, ok := m[pattern]; ok {
-		if seq, ok := pm[id]; ok {
-			return seq
-		}
-	}
-
-	return 0
-}
-
-func (em *entityMap) set(entity string, seq uint64, m map[string]map[string]uint64) {
-	idx := strings.IndexByte(entity, '.')
-	if idx < 0 {
-		return
-	}
-
-	pattern := entity[:idx]
-	id := entity[idx+1:]
-	if _, ok := m[pattern]; !ok {
-		m[pattern] = make(map[string]uint64)
-	}
-	m[pattern][id] = seq
-}
-
-func (em *entityMap) getStart(entity string) uint64 {
-	return em.get(entity, em.sseq)
-}
-
-func (em *entityMap) setStart(entity string, seq uint64) {
-	em.set(entity, seq, em.sseq)
-}
-
-func (em *entityMap) getLast(entity string) uint64 {
-	return em.get(entity, em.lseq)
-}
-
-func (em *entityMap) setLast(entity string, seq uint64) {
-	em.set(entity, seq, em.lseq)
-}
-
-func newEntityMap() *entityMap {
-	return &entityMap{
-		sseq: make(map[string]map[string]uint64),
-		lseq: make(map[string]map[string]uint64),
-	}
-}
-
 // Model combines an Evolver, Decider, and Viewer for a specific type T.
 // It provides thread-safe access to the underlying interfaces and keeps track
 // of the last sequence number of events applied to the model.
@@ -196,7 +136,9 @@ type Model[T any] struct {
 	e Evolver
 	d Decider
 
-	seqs *entityMap
+	// lseq is the last applied stream sequence per entity, keyed by the full
+	// "<entity-type>.<entity-id>" string.
+	lseq map[string]uint64
 
 	mu sync.RWMutex
 }
@@ -209,17 +151,12 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	lseq := m.seqs.getLast(event.Entity)
-
 	// Already applied
-	if lseq >= event.sequence {
+	if m.lseq[event.Entity] >= event.sequence {
 		return nil
 	}
 
-	if m.seqs.getStart(event.Entity) == 0 {
-		m.seqs.setStart(event.Entity, event.sequence)
-	}
-	m.seqs.setLast(event.Entity, event.sequence)
+	m.lseq[event.Entity] = event.sequence
 
 	return m.e.Evolve(ctx, event)
 }
@@ -247,7 +184,7 @@ func (m *Model[T]) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 		entities[event.Entity] = struct{}{}
 		// Either this is explicitly set or we set it to the last known sequence.
 		if event.Expect == nil {
-			event.Expect = ExpectSequence(m.seqs.getLast(event.Entity))
+			event.Expect = ExpectSequence(m.lseq[event.Entity])
 		}
 	}
 
@@ -269,7 +206,7 @@ func NewModel[T any](t T) *Model[T] {
 	m.e, _ = any(t).(Evolver)
 	m.d, _ = any(t).(Decider)
 
-	m.seqs = newEntityMap()
+	m.lseq = make(map[string]uint64)
 
 	return m
 }
