@@ -405,6 +405,31 @@ func TestEventStoreWithRegistry(t *testing.T) {
 				is.Equal(stats.Shipped, 1)
 			},
 		},
+		{
+			// Multiple filters map to multiple consumer filter subjects.
+			"evolve-multi-filters",
+			func(t *testing.T, es *EventStore) {
+				ctx := context.Background()
+
+				events := []*Event{
+					{Entity: "order.1", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderPlaced{}},
+					{Entity: "order.2", Data: &OrderShipped{}},
+					{Entity: "order.3", Data: &OrderCanceled{}},
+				}
+
+				_, err := es.Append(ctx, events)
+				is.NoErr(err)
+
+				var stats OrderStats
+				_, err = es.Evolve(ctx, &stats, WithFilters("*.*.order-shipped", "*.*.order-canceled"))
+				is.NoErr(err)
+
+				is.Equal(stats.Placed, 0)
+				is.Equal(stats.Shipped, 1)
+				is.Equal(stats.Canceled, 1)
+			},
+		},
 	}
 
 	m, _ := newTestManager(t)
