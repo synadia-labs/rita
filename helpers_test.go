@@ -32,38 +32,38 @@ func tenantHandle(t *testing.T, name, tenant string) *EventStore {
 
 // newTestManager starts an embedded NATS server and returns a Manager built
 // with the shared test registry.
-func newTestManager(t *testing.T, opts ...ManagerOption) (*Manager, context.Context) {
-	t.Helper()
+func newTestManager(tb testing.TB, opts ...ManagerOption) (*Manager, context.Context) {
+	tb.Helper()
 
-	srv := testutil.NewNatsServer(t)
-	t.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
+	srv := testutil.NewNatsServer(tb)
+	tb.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
 
 	nc, err := nats.Connect(srv.ClientURL())
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		tb.Fatalf("connect: %v", err)
 	}
-	t.Cleanup(nc.Close)
+	tb.Cleanup(nc.Close)
 
 	tr, err := types.NewRegistry(registry)
 	if err != nil {
-		t.Fatalf("registry: %v", err)
+		tb.Fatalf("registry: %v", err)
 	}
 
 	m, err := New(nc, append([]ManagerOption{WithRegistry(tr)}, opts...)...)
 	if err != nil {
-		t.Fatalf("manager: %v", err)
+		tb.Fatalf("manager: %v", err)
 	}
 
 	return m, context.Background()
 }
 
 // newTestStore returns a store named "store" backed by a fresh embedded server.
-func newTestStore(t *testing.T, opts ...ManagerOption) *EventStore {
-	t.Helper()
-	m, ctx := newTestManager(t, opts...)
+func newTestStore(tb testing.TB, opts ...ManagerOption) *EventStore {
+	tb.Helper()
+	m, ctx := newTestManager(tb, opts...)
 	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "store"})
 	if err != nil {
-		t.Fatalf("create store: %v", err)
+		tb.Fatalf("create store: %v", err)
 	}
 	return es
 }
