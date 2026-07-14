@@ -761,6 +761,33 @@ func TestSubjectsToFilters(t *testing.T) {
 	}
 }
 
+// TestAppendStampsSequences pins that Append records each event's assigned
+// stream sequence on the event itself, on both publish paths. Callers that
+// publish through bare Append or Decide need the per-event sequences (e.g. to
+// resume with WithAfterSequence); previously only DecideAndEvolve derived
+// them, restating the batch-contiguity assumption away from the publish.
+func TestAppendStampsSequences(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	single := &Event{Entity: "order.1", Data: &OrderPlaced{}}
+	seq, err := es.Append(ctx, []*Event{single})
+	is.NoErr(err)
+	is.Equal(seq, uint64(1))
+	is.Equal(single.Sequence(), uint64(1))
+
+	batch := []*Event{
+		{Entity: "order.1", Data: &OrderShipped{}},
+		{Entity: "order.2", Data: &OrderPlaced{}},
+	}
+	seq, err = es.Append(ctx, batch)
+	is.NoErr(err)
+	is.Equal(seq, uint64(3))
+	is.Equal(batch[0].Sequence(), uint64(2))
+	is.Equal(batch[1].Sequence(), uint64(3))
+}
+
 // TestAppendSequenceConflict pins that a stale Expect surfaces as
 // ErrSequenceConflict on BOTH publish paths. Callers retry on
 // errors.Is(err, ErrSequenceConflict), so the JetStream error must be mapped

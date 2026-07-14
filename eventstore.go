@@ -528,9 +528,7 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 		return events, 0, err
 	}
 
-	for i, ev := range events {
-		ev.sequence = seq - uint64(len(events)) + uint64(i) + 1
-
+	for _, ev := range events {
 		if err := model.Evolve(ctx, ev); err != nil {
 			return events, seq, err
 		}
@@ -662,7 +660,9 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 }
 
 // Append appends a one or more events to the subject's event sequence.
-// It returns the resulting sequence number of the last appended event.
+// It returns the resulting sequence number of the last appended event and
+// stamps every event's assigned stream sequence, retrievable via
+// (*Event).Sequence.
 func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error) {
 	if len(events) == 0 {
 		return 0, ErrNoEvents
@@ -706,6 +706,7 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 		msgs = append(msgs, msg)
 	}
 
+	var seq uint64
 	if len(msgs) == 1 {
 		ack, err := s.js.PublishMsg(ctx, msgs[0])
 		if err != nil {
@@ -714,20 +715,28 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 			}
 			return 0, err
 		}
-		return ack.Sequence, nil
-	}
-
-	// Atomic batch publish. Batch rejections surface the same structured
-	// *jetstream.APIError as single publishes, so one predicate serves both.
-	ack, err := jetstreamext.PublishMsgBatch(ctx, s.js, msgs)
-	if err != nil {
-		if isSequenceConflict(err) {
-			return 0, ErrSequenceConflict
+		seq = ack.Sequence
+	} else {
+		// Atomic batch publish. Batch rejections surface the same structured
+		// *jetstream.APIError as single publishes, so one predicate serves both.
+		ack, err := jetstreamext.PublishMsgBatch(ctx, s.js, msgs)
+		if err != nil {
+			if isSequenceConflict(err) {
+				return 0, ErrSequenceConflict
+			}
+			return 0, err
 		}
-		return 0, err
+		seq = ack.Sequence
 	}
 
-	return ack.Sequence, nil
+	// Acks report only the last sequence. The batch is committed atomically,
+	// so the events occupy the contiguous run ending at seq; stamping here
+	// keeps that assumption in the one place that owns the publish.
+	for i := range events {
+		events[i].sequence = seq - uint64(len(events)) + uint64(i) + 1
+	}
+
+	return seq, nil
 }
 
 // Watch creates a watcher that asynchronously consumes events from the event store
