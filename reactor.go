@@ -76,14 +76,14 @@ type ReactorInfo struct {
 	Created        time.Time
 }
 
-// wrapConsumerNotFound translates JetStream's not-found sentinels into the
-// rita-level ErrReactorNotFound for the caller, returning the original error
-// unchanged for any other failure mode.
-func wrapConsumerNotFound(err error) error {
+// reactorErr translates JetStream's not-found sentinels into the rita-level
+// ErrReactorNotFound; any other failure is prefixed with the operation so the
+// JetStream sentinel does not leak into the caller's errors.Is checks.
+func reactorErr(err error, action string) error {
 	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
 		return fmt.Errorf("%w: %v", ErrReactorNotFound, err)
 	}
-	return err
+	return fmt.Errorf("rita: %s: %w", action, err)
 }
 
 func (c *ReactorConfig) applyDefaults() {
@@ -96,6 +96,21 @@ func (c *ReactorConfig) applyDefaults() {
 	if c.AckWait == 0 {
 		c.AckWait = 30 * time.Second
 	}
+}
+
+// prepareReactorConfig runs the preamble shared by the mutating reactor
+// operations — validation, tenant guard, defaults, and projection to the
+// consumer config — so a check added for one operation cannot be forgotten
+// by the others.
+func (s *EventStore) prepareReactorConfig(cfg ReactorConfig) (jetstream.ConsumerConfig, error) {
+	if cfg.Name == "" {
+		return jetstream.ConsumerConfig{}, ErrReactorNameRequired
+	}
+	if err := s.requireTenant(); err != nil {
+		return jetstream.ConsumerConfig{}, err
+	}
+	cfg.applyDefaults()
+	return s.reactorConsumerConfig(cfg)
 }
 
 func (s *EventStore) reactorConsumerConfig(cfg ReactorConfig) (jetstream.ConsumerConfig, error) {
@@ -136,14 +151,7 @@ func (s *EventStore) reactorConfigFromConsumer(cc jetstream.ConsumerConfig) Reac
 // returns a handle for the existing durable. If the config differs,
 // returns ErrReactorExists.
 func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) (Reactor, error) {
-	if cfg.Name == "" {
-		return nil, ErrReactorNameRequired
-	}
-	if err := s.requireTenant(); err != nil {
-		return nil, err
-	}
-	cfg.applyDefaults()
-	cc, err := s.reactorConsumerConfig(cfg)
+	cc, err := s.prepareReactorConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -181,22 +189,12 @@ func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 //
 // Returns ErrReactorNotFound if no durable with this name exists.
 func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reactor, error) {
-	if cfg.Name == "" {
-		return nil, ErrReactorNameRequired
-	}
-	if err := s.requireTenant(); err != nil {
-		return nil, err
-	}
-	cfg.applyDefaults()
-	cc, err := s.reactorConsumerConfig(cfg)
+	cc, err := s.prepareReactorConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := s.js.UpdateConsumer(ctx, s.stream, cc); err != nil {
-		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
-			return nil, mapped
-		}
-		return nil, fmt.Errorf("rita: update reactor: %w", err)
+		return nil, reactorErr(err, "update reactor")
 	}
 	return s.newReactorHandle(ctx, cfg.Name)
 }
@@ -205,14 +203,7 @@ func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 // unbound Reactor handle. Use this for declarative service-startup hooks
 // where idempotent provisioning is desired regardless of prior config.
 func (s *EventStore) CreateOrUpdateReactor(ctx context.Context, cfg ReactorConfig) (Reactor, error) {
-	if cfg.Name == "" {
-		return nil, ErrReactorNameRequired
-	}
-	if err := s.requireTenant(); err != nil {
-		return nil, err
-	}
-	cfg.applyDefaults()
-	cc, err := s.reactorConsumerConfig(cfg)
+	cc, err := s.prepareReactorConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -238,10 +229,7 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 		return err
 	}
 	if err := s.js.DeleteConsumer(ctx, s.stream, name); err != nil {
-		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
-			return mapped
-		}
-		return fmt.Errorf("rita: delete reactor: %w", err)
+		return reactorErr(err, "delete reactor")
 	}
 	return nil
 }
@@ -339,10 +327,7 @@ type reactor struct {
 func (s *EventStore) newReactorHandle(ctx context.Context, name string) (*reactor, error) {
 	cons, err := s.js.Consumer(ctx, s.stream, name)
 	if err != nil {
-		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
-			return nil, mapped
-		}
-		return nil, fmt.Errorf("rita: load reactor handle: %w", err)
+		return nil, reactorErr(err, "load reactor handle")
 	}
 	return &reactor{es: s, durable: name, cons: cons}, nil
 }
@@ -398,10 +383,7 @@ func (r *reactor) Name() string {
 func (r *reactor) Info(ctx context.Context) (*ReactorInfo, error) {
 	info, err := r.cons.Info(ctx)
 	if err != nil {
-		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
-			return nil, mapped
-		}
-		return nil, fmt.Errorf("rita: reactor info: %w", err)
+		return nil, reactorErr(err, "reactor info")
 	}
 	return r.es.reactorInfoFromJS(info), nil
 }
@@ -425,10 +407,7 @@ func (r *reactor) Bind(ctx context.Context, handler ReactorHandler) error {
 	info, err := r.cons.Info(ctx)
 	if err != nil {
 		r.mu.Unlock()
-		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
-			return mapped
-		}
-		return fmt.Errorf("rita: bind reactor: %w", err)
+		return reactorErr(err, "bind reactor")
 	}
 
 	hctx, cancelHandler := context.WithCancel(context.Background())
