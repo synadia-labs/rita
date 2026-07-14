@@ -142,6 +142,28 @@ func mergeStreamMetadata(existing, supplied map[string]string) map[string]string
 	return merged
 }
 
+// toStreamConfig projects the store configuration onto the JetStream stream
+// config. It is the single owner of this mapping so create and update cannot
+// drift apart. Metadata is passed explicitly because the two callers derive it
+// differently (tenancy marker vs merge with existing).
+func (c EventStoreConfig) toStreamConfig(metadata map[string]string) jetstream.StreamConfig {
+	return jetstream.StreamConfig{
+		Name:               fmt.Sprintf(eventStoreNameTmpl, c.Name),
+		Description:        c.Description,
+		Metadata:           metadata,
+		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, c.Name) + ">"},
+		Replicas:           c.Replicas,
+		Storage:            c.Storage,
+		Placement:          c.Placement,
+		RePublish:          c.RePublish,
+		MaxMsgs:            c.MaxMsgs,
+		MaxAge:             c.MaxAge,
+		MaxBytes:           c.MaxBytes,
+		AllowAtomicPublish: true,
+		AllowDirect:        true,
+	}
+}
+
 // Manager creates and manages EventStore instances. It provides shared
 // dependencies (type registry, ID generator, clock) to all stores it creates.
 type Manager struct {
@@ -194,23 +216,7 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 		metadata = streamMetadata(metadata)
 	}
 
-	jsc := &jetstream.StreamConfig{
-		Name:               fmt.Sprintf(eventStoreNameTmpl, config.Name),
-		Description:        config.Description,
-		Metadata:           metadata,
-		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
-		Replicas:           config.Replicas,
-		Storage:            config.Storage,
-		Placement:          config.Placement,
-		RePublish:          config.RePublish,
-		MaxMsgs:            config.MaxMsgs,
-		MaxAge:             config.MaxAge,
-		MaxBytes:           config.MaxBytes,
-		AllowAtomicPublish: true,
-		AllowDirect:        true,
-	}
-
-	_, err := m.js.CreateStream(ctx, *jsc)
+	_, err := m.js.CreateStream(ctx, config.toStreamConfig(metadata))
 	if err != nil {
 		return nil, err
 	}
@@ -257,22 +263,7 @@ func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig)
 		metadata = streamMetadata(metadata)
 	}
 
-	jsc := &jetstream.StreamConfig{
-		Name:               sname,
-		Description:        config.Description,
-		Metadata:           metadata,
-		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, config.Name) + ">"},
-		Replicas:           config.Replicas,
-		Storage:            config.Storage,
-		Placement:          config.Placement,
-		RePublish:          config.RePublish,
-		MaxMsgs:            config.MaxMsgs,
-		MaxAge:             config.MaxAge,
-		MaxBytes:           config.MaxBytes,
-		AllowAtomicPublish: true,
-		AllowDirect:        true,
-	}
-	_, err = m.js.UpdateStream(ctx, *jsc)
+	_, err = m.js.UpdateStream(ctx, config.toStreamConfig(metadata))
 	return err
 }
 
