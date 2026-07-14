@@ -226,12 +226,8 @@ type Watcher interface {
 }
 
 type watcher struct {
-	model  Evolver
 	conCtx jetstream.ConsumeContext
-	con    jetstream.Consumer
 	cancel context.CancelFunc
-
-	opts *options
 }
 
 func (w *watcher) Stop() {
@@ -280,7 +276,6 @@ type EventStore struct {
 	// tenantMode is true when the backing store was created with Tenancy enabled.
 	tenantMode bool
 
-	nc *nats.Conn
 	js jetstream.JetStream
 
 	id     id.ID
@@ -805,13 +800,5 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		return nil, ctx.Err()
 	}
 
-	w := &watcher{
-		model:  model,
-		con:    con,
-		conCtx: conCtx,
-		cancel: wcancel,
-		opts:   &o,
-	}
-
-	return w, nil
+	return &watcher{conCtx: conCtx, cancel: wcancel}, nil
 }

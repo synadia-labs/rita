@@ -168,7 +168,6 @@ func (c EventStoreConfig) toStreamConfig(metadata map[string]string) jetstream.S
 // dependencies (type registry, ID generator, clock) to all stores it creates.
 type Manager struct {
 	logger    *slog.Logger
-	nc        *nats.Conn
 	js        jetstream.JetStream
 	apiPrefix string
 	types     *types.Registry
@@ -193,7 +192,6 @@ func (m *Manager) GetEventStore(ctx context.Context, name string) (*EventStore, 
 	e := &EventStore{
 		name:       name,
 		tenantMode: tenantMode,
-		nc:         m.nc,
 		js:         m.js,
 		id:         m.id,
 		clock:      m.clock,
@@ -224,7 +222,6 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 	es := EventStore{
 		name:       config.Name,
 		tenantMode: config.Tenancy,
-		nc:         m.nc,
 		js:         m.js,
 		id:         m.id,
 		clock:      m.clock,
@@ -276,7 +273,6 @@ func (m *Manager) DeleteEventStore(ctx context.Context, name string) error {
 // New initializes a new Manager instance with a NATS connection.
 func New(nc *nats.Conn, opts ...ManagerOption) (*Manager, error) {
 	m := &Manager{
-		nc:     nc,
 		logger: slog.Default(),
 		id:     id.NUID,
 		clock:  clock.Time,
