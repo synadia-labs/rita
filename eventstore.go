@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,12 +60,31 @@ var (
 	// tokens or wildcards into a subject.
 	subjectToken = `[^.*>\s]+`
 
-	// Entity regex: <entity-type>.<entity-id> — two subject tokens joined by a dot.
-	entityRegex = regexp.MustCompile(`^` + subjectToken + `\.` + subjectToken + `$`)
-
 	// Tenant regex: a single subject token.
 	tenantRegex = regexp.MustCompile(`^` + subjectToken + `$`)
 )
+
+// validEntity reports whether entity is two subject tokens joined by a dot
+// (<entity-type>.<entity-id>). It is the scan equivalent of
+// `^[^.*>\s]+\.[^.*>\s]+$` — validation runs per appended event, so it avoids
+// the regexp engine on that path. The rejected characters mirror subjectToken:
+// a second separator, wildcards, or whitespace (the regexp \s class) would let
+// an entity inject extra tokens or wildcards into a subject.
+func validEntity(entity string) bool {
+	dot := -1
+	for i := 0; i < len(entity); i++ {
+		switch entity[i] {
+		case '.':
+			if dot >= 0 {
+				return false
+			}
+			dot = i
+		case '*', '>', ' ', '\t', '\n', '\f', '\r':
+			return false
+		}
+	}
+	return dot > 0 && dot < len(entity)-1
+}
 
 // parsePattern parses a subject pattern into the full form with exactly three tokens.
 // Empty patterns are expanded to "*.*.*". Individual tokens are not validated
@@ -87,21 +107,12 @@ func parsePattern(subject string) (string, error) {
 	return strings.Join(toks, "."), nil
 }
 
-// subjectPrefix returns the subject prefix for this EventStore combined with the
-// given pattern. When the handle is tenant-scoped, the tenant token is inserted
-// between the store name and the pattern; otherwise the result is byte-identical
-// to the untenanted form "$ES.<name>.<pattern>".
+// subjectPrefix returns the subject prefix for this EventStore combined with
+// the given pattern. The prefix carries the tenant token when the handle is
+// tenant-scoped (set at construction / Tenant re-scoping); otherwise the
+// result is byte-identical to the untenanted form "$ES.<name>.<pattern>".
 func (s *EventStore) subjectPrefix(pattern string) string {
-	base := fmt.Sprintf(eventStoreSubjectTmpl, s.name)
-	if s.tenant != "" {
-		base += s.tenant + "."
-	}
-	return base + pattern
-}
-
-// streamName returns the JetStream stream name backing this EventStore.
-func (s *EventStore) streamName() string {
-	return fmt.Sprintf(eventStoreNameTmpl, s.name)
+	return s.prefix + pattern
 }
 
 // filtersToSubjects expands user-supplied filter patterns to fully-qualified
@@ -259,6 +270,14 @@ func WithNoWait() WatchOption {
 type EventStore struct {
 	name string
 
+	// stream is the JetStream stream name backing this store, and prefix is
+	// the handle's full subject prefix including any tenant token. Both are
+	// fixed for the handle's lifetime, so they are computed once at
+	// construction (and on Tenant re-scoping) to keep them off the per-event
+	// append path.
+	stream string
+	prefix string
+
 	// tenant is the active tenant scope for this handle. Empty means unscoped:
 	// on a tenant store the store-building operations return ErrTenantRequired;
 	// on an untenanted store it is always empty.
@@ -290,6 +309,9 @@ func (s *EventStore) Tenant(tenant string) (*EventStore, error) {
 	}
 	clone := *s
 	clone.tenant = tenant
+	// Rebuild from the untenanted root so re-scoping replaces rather than
+	// nests any prior tenant token.
+	clone.prefix = subjectRoot(s.name) + tenant + "."
 	return &clone, nil
 }
 
@@ -314,7 +336,7 @@ func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 	if event.Entity == "" {
 		return nil, ErrEventEntityRequired
 	}
-	if !entityRegex.MatchString(event.Entity) {
+	if !validEntity(event.Entity) {
 		return nil, ErrEventEntityInvalid
 	}
 
@@ -539,7 +561,7 @@ func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream
 		sopts.DeliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	return s.js.OrderedConsumer(ctx, s.streamName(), sopts)
+	return s.js.OrderedConsumer(ctx, s.stream, sopts)
 }
 
 // Evolve loads events and evolves a model of state. The sequence of the
@@ -572,7 +594,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	// to the current known state.
 	info := con.CachedInfo()
 	defer func() {
-		_ = s.js.DeleteConsumer(ctx, s.streamName(), info.Name)
+		_ = s.js.DeleteConsumer(ctx, s.stream, info.Name)
 	}()
 
 	pending := info.NumPending
@@ -650,7 +672,7 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 	}
 
 	// Prepare messages.
-	var msgs []*nats.Msg
+	msgs := make([]*nats.Msg, 0, len(events))
 
 	for _, event := range events {
 		e, err := s.wrapEvent(event)
@@ -675,10 +697,10 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 			} else {
 				// Get the subject up to the last token.
 				idx := strings.LastIndex(subject, ".")
-				expSubj = fmt.Sprintf("%s.*", subject[:idx])
+				expSubj = subject[:idx] + ".*"
 			}
 			msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, expSubj)
-			msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, fmt.Sprintf("%d", event.Expect.Sequence))
+			msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(event.Expect.Sequence, 10))
 		}
 
 		msgs = append(msgs, msg)

@@ -16,12 +16,12 @@ import (
 func TestTenantSubjectScoping(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	base := &EventStore{name: "demo"} // untenanted
+	base := storeHandle("demo") // untenanted
 	is.Equal(base.subjectPrefix(""), "$ES.demo.")
 	is.Equal(base.subjectPrefix("*.*.*"), "$ES.demo.*.*.*")
 	is.Equal(base.eventSubject(&Event{Entity: "order.1", Type: "order-placed"}), "$ES.demo.order.1.order-placed")
 
-	ten := &EventStore{name: "demo", tenant: "acme", tenantMode: true}
+	ten := tenantHandle(t, "demo", "acme")
 	is.Equal(ten.subjectPrefix(""), "$ES.demo.acme.")
 	is.Equal(ten.subjectPrefix("*.*.*"), "$ES.demo.acme.*.*.*")
 	is.Equal(ten.eventSubject(&Event{Entity: "order.1", Type: "order-placed"}), "$ES.demo.acme.order.1.order-placed")
@@ -32,7 +32,7 @@ func TestTenantSubjectScoping(t *testing.T) {
 // stream, and leaves the untenanted "no filters means whole stream" untouched.
 func TestFiltersToSubjectsTenantScoped(t *testing.T) {
 	is := testutil.NewIs(t)
-	ten := &EventStore{name: "demo", tenant: "acme", tenantMode: true}
+	ten := tenantHandle(t, "demo", "acme")
 
 	got, err := ten.filtersToSubjects(nil)
 	is.NoErr(err)
@@ -43,7 +43,7 @@ func TestFiltersToSubjectsTenantScoped(t *testing.T) {
 	is.Equal(got, []string{"$ES.demo.acme.order.1.*"})
 
 	// Untenanted empty stays whole-stream (byte-identical to today).
-	base := &EventStore{name: "demo"}
+	base := storeHandle("demo")
 	got, err = base.filtersToSubjects(nil)
 	is.NoErr(err)
 	is.Equal(got, []string{})
@@ -53,7 +53,7 @@ func TestFiltersToSubjectsTenantScoped(t *testing.T) {
 // tenant-aware prefix back to the user-facing filter form.
 func TestSubjectsToFiltersTenantScoped(t *testing.T) {
 	is := testutil.NewIs(t)
-	ten := &EventStore{name: "demo", tenant: "acme", tenantMode: true}
+	ten := tenantHandle(t, "demo", "acme")
 
 	got := ten.subjectsToFilters([]string{"$ES.demo.acme.*.*.order-shipped"})
 	is.Equal(got, []string{"*.*.order-shipped"})
@@ -70,7 +70,8 @@ func TestSubjectsToFiltersTenantScoped(t *testing.T) {
 // TestTenantValidation pins the charset rules and mode guard on Tenant().
 func TestTenantValidation(t *testing.T) {
 	is := testutil.NewIs(t)
-	es := &EventStore{name: "demo", tenantMode: true}
+	es := storeHandle("demo")
+	es.tenantMode = true
 
 	for _, bad := range []string{"", "a.b", "a*", "a>", "a b", "a\tb"} {
 		_, err := es.Tenant(bad)
@@ -89,7 +90,7 @@ func TestTenantValidation(t *testing.T) {
 	is.Equal(sc.tenant, "acme")
 
 	// A non-tenant store cannot be scoped.
-	base := &EventStore{name: "demo"}
+	base := storeHandle("demo")
 	_, err = base.Tenant("acme")
 	is.Err(err, ErrTenantNotSupported)
 }

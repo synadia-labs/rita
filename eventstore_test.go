@@ -730,7 +730,7 @@ func TestMixedEntities(t *testing.T) {
 }
 
 func TestFiltersToSubjects(t *testing.T) {
-	es := &EventStore{name: "demo"}
+	es := storeHandle("demo")
 
 	tests := []struct {
 		name    string
@@ -795,7 +795,7 @@ func TestFiltersToSubjects(t *testing.T) {
 }
 
 func TestSubjectsToFilters(t *testing.T) {
-	es := &EventStore{name: "demo"}
+	es := storeHandle("demo")
 
 	tests := []struct {
 		name     string
@@ -855,7 +855,7 @@ func TestEntityValidation(t *testing.T) {
 	is := testutil.NewIs(t)
 
 	for _, good := range []string{"order.1", "order-type.abc123", "a.b"} {
-		is.True(entityRegex.MatchString(good))
+		is.True(validEntity(good))
 	}
 
 	for _, bad := range []string{
@@ -868,7 +868,7 @@ func TestEntityValidation(t *testing.T) {
 		"order *.1", // whitespace
 		"order.\t1", // whitespace
 	} {
-		is.True(!entityRegex.MatchString(bad))
+		is.True(!validEntity(bad))
 	}
 }
 
