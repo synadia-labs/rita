@@ -407,17 +407,7 @@ func TestEventStoreWithRegistry(t *testing.T) {
 		},
 	}
 
-	srv := testutil.NewNatsServer(t)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	m, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
+	m, _ := newTestManager(t)
 
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
@@ -442,23 +432,8 @@ func TestEventStoreWithRegistry(t *testing.T) {
 func TestEventStoreDecide(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer(t)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	m, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
+	es := newTestStore(t)
 	ctx := context.Background()
-	es, err := m.CreateEventStore(ctx, EventStoreConfig{
-		Name: "store",
-	})
-	is.NoErr(err)
 
 	cmd := &Command{
 		Data: &PlaceOrder{},
@@ -480,23 +455,8 @@ func TestEventStoreDecide(t *testing.T) {
 func TestEventStoreDecideAndEvolve(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer(t)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	m, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
+	es := newTestStore(t)
 	ctx := context.Background()
-	es, err := m.CreateEventStore(ctx, EventStoreConfig{
-		Name: "store",
-	})
-	is.NoErr(err)
 
 	state := &OrderStats{}
 	model := NewModel(state)
@@ -547,23 +507,8 @@ func TestEventStoreDecideAndEvolve(t *testing.T) {
 func TestModelWatcher(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer(t)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	mgr, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
+	es := newTestStore(t)
 	ctx := context.Background()
-	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{
-		Name: "store",
-	})
-	is.NoErr(err)
 
 	// Create a model for OrderStats.
 	m := NewModel(&OrderStats{})
@@ -629,23 +574,8 @@ func (m *batchOrderModel) Evolve(ctx context.Context, event *Event) error {
 func TestDecideAndEvolveBatchSequences(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer(t)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	mgr, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
+	es := newTestStore(t)
 	ctx := context.Background()
-	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{
-		Name: "store",
-	})
-	is.NoErr(err)
 
 	state := &batchOrderModel{}
 	model := NewModel(state)
@@ -683,23 +613,8 @@ func (m *mixedEntitiesModel) Evolve(ctx context.Context, event *Event) error {
 func TestMixedEntities(t *testing.T) {
 	is := testutil.NewIs(t)
 
-	srv := testutil.NewNatsServer(t)
-	defer testutil.ShutdownNatsServer(srv)
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	mgr, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
+	es := newTestStore(t)
 	ctx := context.Background()
-	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{
-		Name: "store",
-	})
-	is.NoErr(err)
 
 	m := NewModel(&mixedEntitiesModel{})
 	w, err := es.Watch(ctx, m)
@@ -878,7 +793,7 @@ func TestEntityValidation(t *testing.T) {
 // have to echo every prior key on every update or silently lose it.
 func TestUpdateMergesCustomMetadata(t *testing.T) {
 	is := testutil.NewIs(t)
-	m, ctx := tenantTestManager(t)
+	m, ctx := newTestManager(t)
 
 	_, err := m.CreateEventStore(ctx, EventStoreConfig{
 		Name:     "meta",

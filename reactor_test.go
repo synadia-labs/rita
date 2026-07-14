@@ -10,49 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/testutil"
-	"github.com/synadia-labs/rita/types"
 )
-
-func newReactTestStore(t *testing.T) *EventStore {
-	t.Helper()
-	return newReactTestStoreWithLogger(t, nil)
-}
-
-func newReactTestStoreWithLogger(t *testing.T, logger *slog.Logger) *EventStore {
-	t.Helper()
-
-	srv := testutil.NewNatsServer(t)
-	t.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
-
-	nc, err := nats.Connect(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(nc.Close)
-
-	tr, err := types.NewRegistry(registry)
-	if err != nil {
-		t.Fatalf("registry: %v", err)
-	}
-
-	opts := []ManagerOption{WithRegistry(tr)}
-	if logger != nil {
-		opts = append(opts, WithLogger(logger))
-	}
-	mgr, err := New(nc, opts...)
-	if err != nil {
-		t.Fatalf("manager: %v", err)
-	}
-
-	es, err := mgr.CreateEventStore(context.Background(), EventStoreConfig{Name: "store"})
-	if err != nil {
-		t.Fatalf("create store: %v", err)
-	}
-	return es
-}
 
 func mustCreateReactor(t *testing.T, es *EventStore, cfg ReactorConfig) Reactor {
 	t.Helper()
@@ -76,41 +36,34 @@ func mustBindReactor(t *testing.T, es *EventStore, name string, handler ReactorH
 }
 
 func TestGetReactor_EmptyName(t *testing.T) {
-	es := newReactTestStore(t)
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
 
 	_, err := es.GetReactor(context.Background(), "")
-	if !errors.Is(err, ErrReactorNameRequired) {
-		t.Fatalf("expected ErrReactorNameRequired, got %v", err)
-	}
+	is.Err(err, ErrReactorNameRequired)
 }
 
 func TestBind_NilHandler(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	mustCreateReactor(t, es, ReactorConfig{Name: "nil-handler"})
 
+	is := testutil.NewIs(t)
 	r, err := es.GetReactor(context.Background(), "nil-handler")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Bind(context.Background(), nil); !errors.Is(err, ErrReactorHandlerRequired) {
-		t.Fatalf("expected ErrReactorHandlerRequired, got %v", err)
-	}
+	is.NoErr(err)
+	is.Err(r.Bind(context.Background(), nil), ErrReactorHandlerRequired)
 }
 
 func TestGetReactor_NotFound(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 
+	is := testutil.NewIs(t)
 	_, err := es.GetReactor(context.Background(), "missing")
-	if !errors.Is(err, ErrReactorNotFound) {
-		t.Fatalf("expected ErrReactorNotFound, got %v", err)
-	}
-	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
-		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
-	}
+	is.Err(err, ErrReactorNotFound)
+	assertNoJetStreamSentinel(t, err)
 }
 
 func TestReactor_BasicDelivery(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.Append(ctx, []*Event{
@@ -134,7 +87,7 @@ func TestReactor_BasicDelivery(t *testing.T) {
 }
 
 func TestReactor_ResumesFromStoredPosition(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.Append(ctx, []*Event{
@@ -180,7 +133,7 @@ func TestReactor_ResumesFromStoredPosition(t *testing.T) {
 }
 
 func TestReactor_BackOffAppliedOnNak(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.Append(ctx, []*Event{
@@ -226,7 +179,7 @@ func TestReactor_BackOffAppliedOnNak(t *testing.T) {
 }
 
 func TestReactor_HandlerCtxCancelledOnUnbindDeadline(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.Append(ctx, []*Event{
@@ -252,17 +205,14 @@ func TestReactor_HandlerCtxCancelledOnUnbindDeadline(t *testing.T) {
 		t.Fatal("handler never started")
 	}
 
+	is := testutil.NewIs(t)
 	unbindCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := r.Unbind(unbindCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected deadline exceeded from Unbind, got %v", err)
-	}
+	is.Err(r.Unbind(unbindCtx), context.DeadlineExceeded)
 
 	select {
 	case got := <-handlerCtxErr:
-		if !errors.Is(got, context.Canceled) {
-			t.Fatalf("expected handler ctx Canceled, got %v", got)
-		}
+		is.Err(got, context.Canceled)
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler ctx was not cancelled after Unbind deadline")
 	}
@@ -273,7 +223,7 @@ func TestReactor_HandlerCtxCancelledOnUnbindDeadline(t *testing.T) {
 }
 
 func TestReactor_FiltersTranslation(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.Append(ctx, []*Event{
@@ -303,14 +253,14 @@ func TestReactor_FiltersTranslation(t *testing.T) {
 }
 
 func TestCreateReactor_EmptyName(t *testing.T) {
-	es := newReactTestStore(t)
-	if _, err := es.CreateReactor(context.Background(), ReactorConfig{}); !errors.Is(err, ErrReactorNameRequired) {
-		t.Fatalf("expected ErrReactorNameRequired, got %v", err)
-	}
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	_, err := es.CreateReactor(context.Background(), ReactorConfig{})
+	is.Err(err, ErrReactorNameRequired)
 }
 
 func TestCreateReactor_GetReactor_Roundtrip(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	cfg := ReactorConfig{
@@ -357,7 +307,7 @@ func TestCreateReactor_GetReactor_Roundtrip(t *testing.T) {
 // JetStream normalises AckWait to BackOff[0] when BackOff is set; this test
 // pins both fields independently so the BackOff round-trip is verified.
 func TestCreateReactor_BackOffRoundtrip(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	cfg := ReactorConfig{
@@ -383,7 +333,7 @@ func TestCreateReactor_BackOffRoundtrip(t *testing.T) {
 }
 
 func TestCreateReactor_IdempotentOnMatchingConfig(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	cfg := ReactorConfig{Name: "idem", AckWait: 5 * time.Second}
@@ -396,34 +346,30 @@ func TestCreateReactor_IdempotentOnMatchingConfig(t *testing.T) {
 }
 
 func TestCreateReactor_DifferentConfigReturnsExists(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "conflict", AckWait: 5 * time.Second}); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
+	is := testutil.NewIs(t)
 	_, err := es.CreateReactor(ctx, ReactorConfig{Name: "conflict", AckWait: 10 * time.Second})
-	if !errors.Is(err, ErrReactorExists) {
-		t.Fatalf("expected ErrReactorExists, got %v", err)
-	}
+	is.Err(err, ErrReactorExists)
 	if errors.Is(err, jetstream.ErrConsumerExists) {
 		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
 	}
 }
 
 func TestUpdateReactor_NotFound(t *testing.T) {
-	es := newReactTestStore(t)
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
 	_, err := es.UpdateReactor(context.Background(), ReactorConfig{Name: "missing"})
-	if !errors.Is(err, ErrReactorNotFound) {
-		t.Fatalf("expected ErrReactorNotFound, got %v", err)
-	}
-	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
-		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
-	}
+	is.Err(err, ErrReactorNotFound)
+	assertNoJetStreamSentinel(t, err)
 }
 
 func TestUpdateReactor_GetModifyUpdate(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "upd", AckWait: 5 * time.Second, MaxAckPending: 3}); err != nil {
@@ -459,7 +405,7 @@ func TestUpdateReactor_GetModifyUpdate(t *testing.T) {
 }
 
 func TestUpdateReactor_ReplaceWritesDefaults(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "replace", MaxAckPending: 9, AckWait: 8 * time.Second}); err != nil {
@@ -485,7 +431,7 @@ func TestUpdateReactor_ReplaceWritesDefaults(t *testing.T) {
 }
 
 func TestCreateOrUpdateReactor_Idempotent(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	cfg := ReactorConfig{Name: "cou", AckWait: 5 * time.Second}
@@ -502,18 +448,15 @@ func TestCreateOrUpdateReactor_Idempotent(t *testing.T) {
 }
 
 func TestDeleteReactor_NotFound(t *testing.T) {
-	es := newReactTestStore(t)
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
 	err := es.DeleteReactor(context.Background(), "nope")
-	if !errors.Is(err, ErrReactorNotFound) {
-		t.Fatalf("expected ErrReactorNotFound, got %v", err)
-	}
-	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
-		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
-	}
+	is.Err(err, ErrReactorNotFound)
+	assertNoJetStreamSentinel(t, err)
 }
 
 func TestDeleteReactor_ThenGetReturnsNotFound(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "del"}); err != nil {
@@ -522,17 +465,14 @@ func TestDeleteReactor_ThenGetReturnsNotFound(t *testing.T) {
 	if err := es.DeleteReactor(ctx, "del"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
+	is := testutil.NewIs(t)
 	_, err := es.GetReactor(ctx, "del")
-	if !errors.Is(err, ErrReactorNotFound) {
-		t.Fatalf("expected ErrReactorNotFound, got %v", err)
-	}
-	if errors.Is(err, jetstream.ErrConsumerNotFound) || errors.Is(err, jetstream.ErrConsumerDoesNotExist) {
-		t.Fatalf("expected JetStream sentinel to stay internal, got %v", err)
-	}
+	is.Err(err, ErrReactorNotFound)
+	assertNoJetStreamSentinel(t, err)
 }
 
 func TestListReactors_ReturnsCreated(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "list-a"}); err != nil {
@@ -555,7 +495,7 @@ func TestListReactors_ReturnsCreated(t *testing.T) {
 }
 
 func TestListReactors_ExcludesEphemeralConsumers(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "durable-one"}); err != nil {
@@ -591,7 +531,7 @@ func TestReactor_ConsumeErrHandlerLogsAfterDelete(t *testing.T) {
 	w := &lockedWriter{mu: &mu, buf: &buf}
 	logger := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	es := newReactTestStoreWithLogger(t, logger)
+	es := newTestStore(t, WithLogger(logger))
 	ctx := context.Background()
 
 	if _, err := es.CreateReactor(ctx, ReactorConfig{Name: "errh"}); err != nil {
@@ -632,21 +572,20 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 }
 
 func TestReactor_Bind_ErrorWhenAlreadyBound(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 	mustCreateReactor(t, es, ReactorConfig{Name: "double-bind"})
 
 	r := mustBindReactor(t, es, "double-bind", func(_ context.Context, _ *Event) error { return nil })
 	defer func() { _ = r.Unbind(context.Background()) }()
 
+	is := testutil.NewIs(t)
 	err := r.Bind(ctx, func(_ context.Context, _ *Event) error { return nil })
-	if !errors.Is(err, ErrReactorAlreadyBound) {
-		t.Fatalf("second Bind: want ErrReactorAlreadyBound, got %v", err)
-	}
+	is.Err(err, ErrReactorAlreadyBound)
 }
 
 func TestReactor_Rebind_AfterUnbind(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 	mustCreateReactor(t, es, ReactorConfig{Name: "rebind"})
 
@@ -685,7 +624,7 @@ func TestReactor_Rebind_AfterUnbind(t *testing.T) {
 }
 
 func TestReactor_Info_FreshSnapshot(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	ctx := context.Background()
 	mustCreateReactor(t, es, ReactorConfig{Name: "info-test", AckWait: 7 * time.Second})
 
@@ -705,7 +644,7 @@ func TestReactor_Info_FreshSnapshot(t *testing.T) {
 }
 
 func TestReactor_Name(t *testing.T) {
-	es := newReactTestStore(t)
+	es := newTestStore(t)
 	mustCreateReactor(t, es, ReactorConfig{Name: "named"})
 
 	r := mustBindReactor(t, es, "named", func(_ context.Context, _ *Event) error { return nil })
