@@ -147,7 +147,7 @@ func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.js.CreateConsumer(ctx, s.streamName(), cc); err != nil {
+	if _, err := s.js.CreateConsumer(ctx, s.stream, cc); err != nil {
 		if errors.Is(err, jetstream.ErrConsumerExists) {
 			return nil, fmt.Errorf("%w: %v", ErrReactorExists, err)
 		}
@@ -192,7 +192,7 @@ func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.js.UpdateConsumer(ctx, s.streamName(), cc); err != nil {
+	if _, err := s.js.UpdateConsumer(ctx, s.stream, cc); err != nil {
 		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
 			return nil, mapped
 		}
@@ -216,7 +216,7 @@ func (s *EventStore) CreateOrUpdateReactor(ctx context.Context, cfg ReactorConfi
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.js.CreateOrUpdateConsumer(ctx, s.streamName(), cc); err != nil {
+	if _, err := s.js.CreateOrUpdateConsumer(ctx, s.stream, cc); err != nil {
 		return nil, fmt.Errorf("rita: create-or-update reactor: %w", err)
 	}
 	return s.newReactorHandle(ctx, cfg.Name)
@@ -237,7 +237,7 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 	if err := s.requireTenant(); err != nil {
 		return err
 	}
-	if err := s.js.DeleteConsumer(ctx, s.streamName(), name); err != nil {
+	if err := s.js.DeleteConsumer(ctx, s.stream, name); err != nil {
 		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
 			return mapped
 		}
@@ -282,7 +282,7 @@ func (s *EventStore) GetReactor(ctx context.Context, name string) (Reactor, erro
 // prefix and is surfaced verbatim ("$ES.<name>.<other-tenant>.*.*.order-shipped").
 // See GetReactor for the rationale and the caller's namespacing responsibility.
 func (s *EventStore) ListReactors(ctx context.Context) ([]*ReactorInfo, error) {
-	stream, err := s.js.Stream(ctx, s.streamName())
+	stream, err := s.js.Stream(ctx, s.stream)
 	if err != nil {
 		return nil, fmt.Errorf("rita: list reactors: %w", err)
 	}
@@ -337,7 +337,7 @@ type reactor struct {
 // The consumer is fetched eagerly so Bind can read BackOff from the cached
 // ConsumerInfo without an extra round-trip.
 func (s *EventStore) newReactorHandle(ctx context.Context, name string) (*reactor, error) {
-	cons, err := s.js.Consumer(ctx, s.streamName(), name)
+	cons, err := s.js.Consumer(ctx, s.stream, name)
 	if err != nil {
 		if mapped := wrapConsumerNotFound(err); errors.Is(mapped, ErrReactorNotFound) {
 			return nil, mapped

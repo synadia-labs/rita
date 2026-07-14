@@ -32,6 +32,19 @@ const (
 	natsMetaPrefix = "_nats."
 )
 
+// streamName returns the JetStream stream name ("ES_<name>") backing the
+// store with the given name. Single owner of the template so the
+// backward-compatible naming cannot drift between call sites.
+func streamName(name string) string {
+	return fmt.Sprintf(eventStoreNameTmpl, name)
+}
+
+// subjectRoot returns the untenanted subject prefix ("$ES.<name>.") for the
+// store with the given name. Same single-owner rationale as streamName.
+func subjectRoot(name string) string {
+	return fmt.Sprintf(eventStoreSubjectTmpl, name)
+}
+
 type managerOption func(o *Manager) error
 
 func (f managerOption) addOption(o *Manager) error {
@@ -148,10 +161,10 @@ func mergeStreamMetadata(existing, supplied map[string]string) map[string]string
 // differently (tenancy marker vs merge with existing).
 func (c EventStoreConfig) toStreamConfig(metadata map[string]string) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:               fmt.Sprintf(eventStoreNameTmpl, c.Name),
+		Name:               streamName(c.Name),
 		Description:        c.Description,
 		Metadata:           metadata,
-		Subjects:           []string{fmt.Sprintf(eventStoreSubjectTmpl, c.Name) + ">"},
+		Subjects:           []string{subjectRoot(c.Name) + ">"},
 		Replicas:           c.Replicas,
 		Storage:            c.Storage,
 		Placement:          c.Placement,
@@ -180,7 +193,7 @@ func (m *Manager) GetEventStore(ctx context.Context, name string) (*EventStore, 
 		return nil, ErrEventStoreNameRequired
 	}
 
-	sname := fmt.Sprintf(eventStoreNameTmpl, name)
+	sname := streamName(name)
 
 	// Verify the stream exists and discover whether it is a tenant store.
 	str, err := m.js.Stream(ctx, sname)
@@ -191,6 +204,8 @@ func (m *Manager) GetEventStore(ctx context.Context, name string) (*EventStore, 
 
 	e := &EventStore{
 		name:       name,
+		stream:     sname,
+		prefix:     subjectRoot(name),
 		tenantMode: tenantMode,
 		js:         m.js,
 		id:         m.id,
@@ -221,6 +236,8 @@ func (m *Manager) CreateEventStore(ctx context.Context, config EventStoreConfig)
 
 	es := EventStore{
 		name:       config.Name,
+		stream:     streamName(config.Name),
+		prefix:     subjectRoot(config.Name),
 		tenantMode: config.Tenancy,
 		js:         m.js,
 		id:         m.id,
@@ -245,8 +262,7 @@ func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig)
 		return ErrEventStoreNameRequired
 	}
 
-	sname := fmt.Sprintf(eventStoreNameTmpl, config.Name)
-	str, err := m.js.Stream(ctx, sname)
+	str, err := m.js.Stream(ctx, streamName(config.Name))
 	if err != nil {
 		return err
 	}
@@ -266,8 +282,7 @@ func (m *Manager) UpdateEventStore(ctx context.Context, config EventStoreConfig)
 
 // Delete deletes the event store.
 func (m *Manager) DeleteEventStore(ctx context.Context, name string) error {
-	name = fmt.Sprintf(eventStoreNameTmpl, name)
-	return m.js.DeleteStream(ctx, name)
+	return m.js.DeleteStream(ctx, streamName(name))
 }
 
 // New initializes a new Manager instance with a NATS connection.
