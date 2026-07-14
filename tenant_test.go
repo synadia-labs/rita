@@ -1,12 +1,9 @@
 package rita
 
 import (
-	"context"
 	"testing"
 
-	"github.com/nats-io/nats.go"
 	"github.com/synadia-labs/rita/testutil"
-	"github.com/synadia-labs/rita/types"
 )
 
 // --- Unit tests: subject construction & validation (no server) ---
@@ -97,31 +94,12 @@ func TestTenantValidation(t *testing.T) {
 
 // --- Integration tests (with server) ---
 
-func tenantTestManager(t *testing.T) (*Manager, context.Context) {
-	t.Helper()
-	is := testutil.NewIs(t)
-
-	srv := testutil.NewNatsServer(t)
-	t.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
-
-	nc, err := nats.Connect(srv.ClientURL())
-	is.NoErr(err)
-
-	tr, err := types.NewRegistry(registry)
-	is.NoErr(err)
-
-	m, err := New(nc, WithRegistry(tr))
-	is.NoErr(err)
-
-	return m, context.Background()
-}
-
 // TestTenantStoreEnforcement verifies two-way enforcement: every store-building
 // operation on an unscoped tenant handle is rejected, a scoped handle works, and
 // a non-tenant store refuses scoping.
 func TestTenantStoreEnforcement(t *testing.T) {
 	is := testutil.NewIs(t)
-	m, ctx := tenantTestManager(t)
+	m, ctx := newTestManager(t)
 
 	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "tstore", Tenancy: true})
 	is.NoErr(err)
@@ -173,7 +151,7 @@ func TestTenantStoreEnforcement(t *testing.T) {
 // wire and in the optimistic-concurrency sequence space.
 func TestTenantIsolation(t *testing.T) {
 	is := testutil.NewIs(t)
-	m, ctx := tenantTestManager(t)
+	m, ctx := newTestManager(t)
 
 	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "iso", Tenancy: true})
 	is.NoErr(err)
@@ -211,7 +189,7 @@ func TestTenantIsolation(t *testing.T) {
 // subject it does today.
 func TestUntenantedSubjectUnchanged(t *testing.T) {
 	is := testutil.NewIs(t)
-	m, ctx := tenantTestManager(t)
+	m, ctx := newTestManager(t)
 
 	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "plain"})
 	is.NoErr(err)
@@ -230,7 +208,7 @@ func TestUntenantedSubjectUnchanged(t *testing.T) {
 // a fresh handle and is not demoted by an update that omits Tenancy.
 func TestTenantModePersisted(t *testing.T) {
 	is := testutil.NewIs(t)
-	m, ctx := tenantTestManager(t)
+	m, ctx := newTestManager(t)
 
 	_, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "persist", Tenancy: true})
 	is.NoErr(err)
@@ -260,7 +238,7 @@ func TestTenantModePersisted(t *testing.T) {
 // its filter subjects to the tenant and round-trips back to the user form.
 func TestTenantReactorRoundTrip(t *testing.T) {
 	is := testutil.NewIs(t)
-	m, ctx := tenantTestManager(t)
+	m, ctx := newTestManager(t)
 
 	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "rstore", Tenancy: true})
 	is.NoErr(err)
