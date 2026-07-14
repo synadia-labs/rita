@@ -761,6 +761,34 @@ func TestSubjectsToFilters(t *testing.T) {
 	}
 }
 
+// TestAppendSequenceConflict pins that a stale Expect surfaces as
+// ErrSequenceConflict on BOTH publish paths. Callers retry on
+// errors.Is(err, ErrSequenceConflict), so the JetStream error must be mapped
+// on the single-publish path (structured APIError) and the batch path
+// (previously a brittle message-text match) alike.
+func TestAppendSequenceConflict(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed the entity's subject so an ExpectSequence(0) below is stale.
+	_, err := es.Append(ctx, []*Event{{Entity: "order.1", Data: &OrderPlaced{}}})
+	is.NoErr(err)
+
+	// Single-event append takes the PublishMsg path.
+	_, err = es.Append(ctx, []*Event{
+		{Entity: "order.1", Data: &OrderShipped{}, Expect: ExpectSequence(0)},
+	})
+	is.Err(err, ErrSequenceConflict)
+
+	// Multi-event append takes the atomic batch path.
+	_, err = es.Append(ctx, []*Event{
+		{Entity: "order.1", Data: &OrderShipped{}, Expect: ExpectSequence(0)},
+		{Entity: "order.1", Data: &OrderShipped{}},
+	})
+	is.Err(err, ErrSequenceConflict)
+}
+
 // TestEntityValidation pins that an entity is exactly two subject tokens and
 // that neither token may smuggle in a wildcard or whitespace. This matters
 // because the entity is interpolated straight into the published subject: a '*'
