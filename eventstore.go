@@ -717,10 +717,11 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 		return ack.Sequence, nil
 	}
 
-	// Atomic batch publish.
+	// Atomic batch publish. Batch rejections surface the same structured
+	// *jetstream.APIError as single publishes, so one predicate serves both.
 	ack, err := jetstreamext.PublishMsgBatch(ctx, s.js, msgs)
 	if err != nil {
-		if strings.Contains(err.Error(), "wrong last sequence") {
+		if isSequenceConflict(err) {
 			return 0, ErrSequenceConflict
 		}
 		return 0, err
