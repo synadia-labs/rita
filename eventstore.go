@@ -409,38 +409,8 @@ func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) 
 	return msg, nil
 }
 
-// unpackEvent unpacks an Event from a NATS message.
+// unpackEvent unpacks an Event from a consumed NATS message.
 func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
-	eventType := msg.Headers().Get(eventTypeHdr)
-	codecName := msg.Headers().Get(eventCodecHdr)
-
-	var (
-		data any
-		err  error
-	)
-
-	c, ok := codec.Codecs[codecName]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, codecName)
-	}
-
-	// No type registry, so assume byte slice.
-	if s.types == nil {
-		var b []byte
-		err = c.Unmarshal(msg.Data(), &b)
-		data = b
-	} else {
-		var v any
-		v, err = s.types.Init(eventType)
-		if err == nil {
-			err = c.Unmarshal(msg.Data(), v)
-			data = v
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-
 	var seq uint64
 	// If this message is not from a native JS subscription, the reply will not
 	// be set. This is where metadata is parsed from. In cases where a message is
@@ -452,15 +422,48 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 		}
 		seq = md.Sequence.Stream
 	}
+	return s.unpackEventFrom(msg.Subject(), seq, msg.Headers(), msg.Data())
+}
 
-	eventTime, err := time.Parse(eventTimeFormat, msg.Headers().Get(eventTimeHdr))
+// unpackEventFrom builds an Event from the parts every message
+// representation shares, so alternative transports (e.g. direct get) can
+// reuse the exact unpack path.
+func (s *EventStore) unpackEventFrom(subject string, seq uint64, headers nats.Header, data []byte) (*Event, error) {
+	eventType := headers.Get(eventTypeHdr)
+	codecName := headers.Get(eventCodecHdr)
+
+	var (
+		val any
+		err error
+	)
+
+	c, ok := codec.Codecs[codecName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, codecName)
+	}
+
+	// No type registry, so assume byte slice.
+	if s.types == nil {
+		var b []byte
+		err = c.Unmarshal(data, &b)
+		val = b
+	} else {
+		val, err = s.types.Init(eventType)
+		if err == nil {
+			err = c.Unmarshal(data, val)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	eventTime, err := time.Parse(eventTimeFormat, headers.Get(eventTimeHdr))
 	if err != nil {
 		return nil, fmt.Errorf("unpack: failed to parse event time: %w", err)
 	}
 
 	var meta map[string]string
 
-	headers := msg.Headers()
 	for h := range headers {
 		if strings.HasPrefix(h, eventMetaPrefixHdr) {
 			if meta == nil {
@@ -474,11 +477,11 @@ func (s *EventStore) unpackEvent(msg jetstream.Msg) (*Event, error) {
 	return &Event{
 		ID:       headers.Get(nats.MsgIdHdr),
 		Entity:   headers.Get(eventEntityHdr),
-		Type:     headers.Get(eventTypeHdr),
+		Type:     eventType,
 		Time:     eventTime,
-		Data:     data,
+		Data:     val,
 		Meta:     meta,
-		subject:  msg.Subject(),
+		subject:  subject,
 		sequence: seq,
 	}, nil
 }
@@ -600,7 +603,11 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		return 0, nil
 	}
 
-	// TODO: more efficient way to do this?
+	// Replaying with batched direct gets instead of this ephemeral consumer
+	// was evaluated and rejected: it saves the consumer create/delete RPCs
+	// (~70µs, visible only on tiny replays) but consumes 2.5-3x slower at
+	// 1k+ events and is a wash on per-entity reloads. See
+	// BenchmarkEvolveReplay and its directGetReplay prototype.
 	msgCtx, err := con.Messages()
 	if err != nil {
 		return 0, err
