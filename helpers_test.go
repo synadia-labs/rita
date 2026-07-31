@@ -14,7 +14,7 @@ import (
 // storeHandle builds an unscoped handle the way the Manager constructors do,
 // for unit tests that exercise subject construction without a server.
 func storeHandle(name string) *EventStore {
-	return &EventStore{name: name, stream: streamName(name), prefix: subjectRoot(name)}
+	return &EventStore{name: name, stream: streamName(name), prefix: subjectRoot(name), types: binaryTypes{}}
 }
 
 // tenantHandle builds a tenant-scoped handle through the production Tenant()
