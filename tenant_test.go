@@ -315,3 +315,49 @@ func reactorNames(rs []*ReactorInfo) []string {
 	}
 	return names
 }
+
+// TestTenantReactorMutationScoped pins write-side isolation: lookup scoping
+// makes foreign reactors invisible, so mutations must refuse them too —
+// otherwise a scoped handle could delete or overwrite a durable it cannot even
+// see, by guessing its name. Delete/Update surface the foreign durable as
+// absent (matching GetReactor); the upsert surfaces the name as taken rather
+// than silently rewriting the foreign durable's filters to its own tenant.
+func TestTenantReactorMutationScoped(t *testing.T) {
+	is := testutil.NewIs(t)
+	m, ctx := newTestManager(t)
+
+	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "rmut", Tenancy: true})
+	is.NoErr(err)
+
+	acme, err := es.Tenant("acme")
+	is.NoErr(err)
+	beta, err := es.Tenant("beta")
+	is.NoErr(err)
+
+	_, err = beta.CreateReactor(ctx, ReactorConfig{Name: "beta-shipper", Filters: []string{"*.*.order-shipped"}})
+	is.NoErr(err)
+
+	// A foreign durable cannot be deleted or updated; it reads as absent.
+	err = acme.DeleteReactor(ctx, "beta-shipper")
+	is.Err(err, ErrReactorNotFound)
+
+	_, err = acme.UpdateReactor(ctx, ReactorConfig{Name: "beta-shipper", Filters: []string{"*.*.order-placed"}})
+	is.Err(err, ErrReactorNotFound)
+
+	// An upsert cannot steal it either; the name reads as taken.
+	_, err = acme.CreateOrUpdateReactor(ctx, ReactorConfig{Name: "beta-shipper", Filters: []string{"*.*.order-placed"}})
+	is.Err(err, ErrReactorExists)
+
+	// The foreign durable is untouched: still beta's, with its original filter.
+	r, err := beta.GetReactor(ctx, "beta-shipper")
+	is.NoErr(err)
+	info, err := r.Info(ctx)
+	is.NoErr(err)
+	is.Equal(info.Config.Filters, []string{"*.*.order-shipped"})
+
+	// The owner retains full mutation rights.
+	_, err = beta.CreateOrUpdateReactor(ctx, ReactorConfig{Name: "beta-shipper", Filters: []string{"*.*.order-returned"}})
+	is.NoErr(err)
+	err = beta.DeleteReactor(ctx, "beta-shipper")
+	is.NoErr(err)
+}

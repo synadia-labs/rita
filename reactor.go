@@ -188,10 +188,15 @@ func (s *EventStore) CreateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 // instances do not hot-reload updated settings. Unbind and Bind again to
 // pick up changed runtime retry behavior such as BackOff.
 //
-// Returns ErrReactorNotFound if no durable with this name exists.
+// Returns ErrReactorNotFound if no durable with this name exists, or — on a
+// tenant-scoped handle — if it belongs to another tenant (matching
+// GetReactor's visibility).
 func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reactor, error) {
 	cc, err := s.prepareReactorConfig(cfg)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.requireReactorScope(ctx, cfg.Name, "update reactor"); err != nil {
 		return nil, err
 	}
 	if _, err := s.js.UpdateConsumer(ctx, s.stream, cc); err != nil {
@@ -203,10 +208,29 @@ func (s *EventStore) UpdateReactor(ctx context.Context, cfg ReactorConfig) (Reac
 // CreateOrUpdateReactor provisions or updates a reactor and returns an
 // unbound Reactor handle. Use this for declarative service-startup hooks
 // where idempotent provisioning is desired regardless of prior config.
+//
+// On a tenant-scoped handle the upsert applies only to the tenant's own
+// durable: a name held by another tenant returns ErrReactorExists rather than
+// overwriting the foreign durable.
 func (s *EventStore) CreateOrUpdateReactor(ctx context.Context, cfg ReactorConfig) (Reactor, error) {
 	cc, err := s.prepareReactorConfig(cfg)
 	if err != nil {
 		return nil, err
+	}
+	// An upsert must not steal a durable belonging to another tenant; the
+	// name reads as taken, matching the create path's conflict signal.
+	if s.tenant != "" {
+		cons, err := s.js.Consumer(ctx, s.stream, cfg.Name)
+		switch {
+		case err == nil:
+			if !s.reactorInTenantScope(cons.CachedInfo().Config.FilterSubjects) {
+				return nil, fmt.Errorf("%w: %s", ErrReactorExists, cfg.Name)
+			}
+		case errors.Is(err, jetstream.ErrConsumerNotFound), errors.Is(err, jetstream.ErrConsumerDoesNotExist):
+			// Absent: proceeds as a create.
+		default:
+			return nil, fmt.Errorf("rita: create-or-update reactor: %w", err)
+		}
 	}
 	if _, err := s.js.CreateOrUpdateConsumer(ctx, s.stream, cc); err != nil {
 		return nil, fmt.Errorf("rita: create-or-update reactor: %w", err)
@@ -221,12 +245,17 @@ func (s *EventStore) CreateOrUpdateReactor(ctx context.Context, cfg ReactorConfi
 // EventStore's logger. The caller is still responsible for calling
 // (Reactor).Unbind to release the runtime handle.
 //
-// Returns ErrReactorNotFound if no reactor with this name exists.
+// Returns ErrReactorNotFound if no reactor with this name exists, or — on a
+// tenant-scoped handle — if it belongs to another tenant (matching
+// GetReactor's visibility).
 func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 	if name == "" {
 		return ErrReactorNameRequired
 	}
 	if err := s.requireTenant(); err != nil {
+		return err
+	}
+	if err := s.requireReactorScope(ctx, name, "delete reactor"); err != nil {
 		return err
 	}
 	if err := s.js.DeleteConsumer(ctx, s.stream, name); err != nil {
@@ -321,6 +350,26 @@ func (s *EventStore) reactorInTenantScope(filterSubjects []string) bool {
 		}
 	}
 	return true
+}
+
+// requireReactorScope guards mutations of an existing durable on a
+// tenant-scoped handle. Lookup scoping makes foreign reactors invisible, so
+// without this check a scoped handle could still delete or overwrite a
+// foreign durable by guessing its name. An out-of-scope durable is
+// indistinguishable from an absent one, matching GetReactor. Unscoped handles
+// keep the stream-wide view and skip the check.
+func (s *EventStore) requireReactorScope(ctx context.Context, name, action string) error {
+	if s.tenant == "" {
+		return nil
+	}
+	cons, err := s.js.Consumer(ctx, s.stream, name)
+	if err != nil {
+		return reactorErr(err, action)
+	}
+	if !s.reactorInTenantScope(cons.CachedInfo().Config.FilterSubjects) {
+		return fmt.Errorf("%w: %s", ErrReactorNotFound, name)
+	}
+	return nil
 }
 
 func (s *EventStore) reactorInfoFromJS(info *jetstream.ConsumerInfo) *ReactorInfo {
