@@ -14,15 +14,57 @@ import (
 func TestTenantSubjectScoping(t *testing.T) {
 	is := testutil.NewIs(t)
 
+	mustPrefix := func(s *EventStore, pattern string) string {
+		got, err := s.subjectPrefix(pattern)
+		is.NoErr(err)
+		return got
+	}
+	mustSubject := func(s *EventStore, e *Event) string {
+		got, err := s.eventSubject(e)
+		is.NoErr(err)
+		return got
+	}
+
 	base := storeHandle("demo") // untenanted
-	is.Equal(base.subjectPrefix(""), "$ES.demo.")
-	is.Equal(base.subjectPrefix("*.*.*"), "$ES.demo.*.*.*")
-	is.Equal(base.eventSubject(&Event{Entity: "order.1", Type: "order-placed"}), "$ES.demo.order.1.order-placed")
+	is.Equal(mustPrefix(base, ""), "$ES.demo.")
+	is.Equal(mustPrefix(base, "*.*.*"), "$ES.demo.*.*.*")
+	is.Equal(mustSubject(base, &Event{Entity: "order.1", Type: "order-placed"}), "$ES.demo.order.1.order-placed")
 
 	ten := tenantHandle(t, "demo", "acme")
-	is.Equal(ten.subjectPrefix(""), "$ES.demo.acme.")
-	is.Equal(ten.subjectPrefix("*.*.*"), "$ES.demo.acme.*.*.*")
-	is.Equal(ten.eventSubject(&Event{Entity: "order.1", Type: "order-placed"}), "$ES.demo.acme.order.1.order-placed")
+	is.Equal(mustPrefix(ten, ""), "$ES.demo.acme.")
+	is.Equal(mustPrefix(ten, "*.*.*"), "$ES.demo.acme.*.*.*")
+	is.Equal(mustSubject(ten, &Event{Entity: "order.1", Type: "order-placed"}), "$ES.demo.acme.order.1.order-placed")
+}
+
+// TestTenantEnforcementStructural pins that the tenant guard lives in subject
+// construction itself, not per-operation convention: any code path — present
+// or future — that builds subjects from an unscoped tenant-mode handle is
+// refused. The filtersToSubjects(nil) case is the critical one: without a
+// guard there, empty filters fall through to empty FilterSubjects, which
+// JetStream treats as "whole stream" — every tenant's events.
+func TestTenantEnforcementStructural(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	es := storeHandle("demo")
+	es.tenantMode = true // tenant-mode store, no Tenant() scope applied
+
+	_, err := es.subjectPrefix("*.*.*")
+	is.Err(err, ErrTenantRequired)
+
+	_, err = es.eventSubject(&Event{Entity: "order.1", Type: "order-placed"})
+	is.Err(err, ErrTenantRequired)
+
+	_, err = es.filtersToSubjects([]string{"order.1"})
+	is.Err(err, ErrTenantRequired)
+
+	_, err = es.filtersToSubjects(nil)
+	is.Err(err, ErrTenantRequired)
+
+	// Decode direction stays open: reactor lookups are documented as
+	// stream-global, so stripping the store prefix must work unscoped and
+	// surface foreign tenant tokens verbatim rather than erroring.
+	got := es.subjectsToFilters([]string{"$ES.demo.acme.order.1.order-placed"})
+	is.Equal(got, []string{"acme.order.1.order-placed"})
 }
 
 // TestFiltersToSubjectsTenantScoped verifies a tenant handle confines filters to

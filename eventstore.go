@@ -111,13 +111,27 @@ func parsePattern(subject string) (string, error) {
 // the given pattern. The prefix carries the tenant token when the handle is
 // tenant-scoped (set at construction / Tenant re-scoping); otherwise the
 // result is byte-identical to the untenanted form "$ES.<name>.<pattern>".
-func (s *EventStore) subjectPrefix(pattern string) string {
-	return s.prefix + pattern
+//
+// Returns ErrTenantRequired on an unscoped tenant-mode handle: subjects built
+// without a tenant token would read or write across tenants, so the invariant
+// is enforced here — where subjects are made — rather than relying on each
+// operation to remember a guard.
+func (s *EventStore) subjectPrefix(pattern string) (string, error) {
+	if err := s.requireTenant(); err != nil {
+		return "", err
+	}
+	return s.prefix + pattern, nil
 }
 
 // filtersToSubjects expands user-supplied filter patterns to fully-qualified
 // JetStream subjects scoped to this store.
 func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
+	// Guard here as well as in subjectPrefix: with no filters on an unscoped
+	// tenant-mode handle the loop below never runs, and the resulting empty
+	// FilterSubjects would consume the whole stream — every tenant's events.
+	if err := s.requireTenant(); err != nil {
+		return nil, err
+	}
 	// A tenant-scoped handle with no explicit filters must still be confined to
 	// its tenant, so default to the tenant's full pattern ("*.*.*") rather than
 	// the whole stream. Untenanted stores keep the historical "no filters means
@@ -131,7 +145,11 @@ func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		subjects[i] = s.subjectPrefix(pp)
+		subject, err := s.subjectPrefix(pp)
+		if err != nil {
+			return nil, err
+		}
+		subjects[i] = subject
 	}
 	return subjects, nil
 }
@@ -146,7 +164,11 @@ func (s *EventStore) filtersToSubjects(filters []string) ([]string, error) {
 // empty, so a reactor created with no filters round-trips to no filters rather
 // than appearing to carry an explicit one.
 func (s *EventStore) subjectsToFilters(subjects []string) []string {
-	prefix := s.subjectPrefix("")
+	// Decode direction: strips whatever prefix this handle carries, never
+	// builds subjects, so it stays usable on an unscoped handle — reactor
+	// lookups are documented as stream-global and surface foreign-tenant
+	// subjects verbatim.
+	prefix := s.prefix
 	filters := make([]string, 0, len(subjects))
 	for _, fs := range subjects {
 		if rest, ok := strings.CutPrefix(fs, prefix); ok {
@@ -315,9 +337,12 @@ func (s *EventStore) Tenant(tenant string) (*EventStore, error) {
 	return &clone, nil
 }
 
-// requireTenant guards store-building operations: on a tenant store a concrete
+// requireTenant is the tenant-scope predicate: on a tenant store a concrete
 // tenant scope is mandatory so events are published to — and read from — a
-// single tenant. It is a no-op on untenanted stores.
+// single tenant. It is a no-op on untenanted stores. Structural enforcement
+// lives in subjectPrefix/filtersToSubjects, where subjects are built; the
+// remaining direct calls are operations that must fail before side effects
+// (Decide, Append) or that never build a subject (DeleteReactor).
 func (s *EventStore) requireTenant() error {
 	if s.tenantMode && s.tenant == "" {
 		return ErrTenantRequired
@@ -575,10 +600,6 @@ func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream
 // only events of that specific type for that specific entity will be loaded.
 // Wildcards can be used as well.
 func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOption) (uint64, error) {
-	if err := s.requireTenant(); err != nil {
-		return 0, err
-	}
-
 	var o options
 	for _, opt := range opts {
 		if err := opt.setOpt(&o); err != nil {
@@ -674,6 +695,8 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 	if len(events) == 0 {
 		return 0, ErrNoEvents
 	}
+	// Guard before wrapEvent so an unscoped handle fails before the caller's
+	// events are mutated (Type/ID/Time defaults). eventSubject re-checks.
 	if err := s.requireTenant(); err != nil {
 		return 0, err
 	}
@@ -687,7 +710,10 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 			return 0, err
 		}
 
-		subject := s.eventSubject(e)
+		subject, err := s.eventSubject(e)
+		if err != nil {
+			return 0, err
+		}
 		msg, err := s.packEvent(subject, e)
 		if err != nil {
 			return 0, err
@@ -700,7 +726,10 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 				if err != nil {
 					return 0, err
 				}
-				expSubj = s.subjectPrefix(pattern)
+				expSubj, err = s.subjectPrefix(pattern)
+				if err != nil {
+					return 0, err
+				}
 			} else {
 				// Get the subject up to the last token.
 				idx := strings.LastIndex(subject, ".")
@@ -752,10 +781,6 @@ func (s *EventStore) Append(ctx context.Context, events []*Event) (uint64, error
 // Since this will update the Evolver asynchronously, the Evolver implementation must be
 // thread-safe. Use the `NewModel()` helper to create a thread-safe model.
 func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOption) (Watcher, error) {
-	if err := s.requireTenant(); err != nil {
-		return nil, err
-	}
-
 	var o options
 	for _, opt := range opts {
 		if err := opt.setOpt(&o); err != nil {
