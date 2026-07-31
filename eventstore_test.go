@@ -140,6 +140,69 @@ func TestEventStoreNoRegistry(t *testing.T) {
 	is.Equal(events[0].Data, []byte("hello"))
 }
 
+// binValue exercises the encoding.BinaryMarshaler path of the binary codec.
+type binValue struct{ b []byte }
+
+func (v binValue) MarshalBinary() ([]byte, error) { return v.b, nil }
+
+// TestNoRegistryWireCompat pins the no-registry wire format: bodies are the
+// caller's raw bytes (or MarshalBinary output), the codec header says
+// "binary", and the caller owns the type name. Any change to the
+// degenerate-registry path must keep these bytes identical or stored events
+// become unreadable across versions.
+func TestNoRegistryWireCompat(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	srv := testutil.NewNatsServer(t)
+	t.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
+
+	nc, err := nats.Connect(srv.ClientURL())
+	is.NoErr(err)
+	t.Cleanup(nc.Close)
+
+	m, err := New(nc)
+	is.NoErr(err)
+
+	ctx := context.Background()
+	es, err := m.CreateEventStore(ctx, EventStoreConfig{Name: "store"})
+	is.NoErr(err)
+
+	// Type is caller-owned with no registry: absent means error, not lookup.
+	_, err = es.Append(ctx, []*Event{{Entity: "order.1", Data: []byte("x")}})
+	is.Err(err, ErrEventTypeRequired)
+
+	seq, err := es.Append(ctx, []*Event{{Entity: "order.1", Type: "order-placed", Data: []byte("payload")}})
+	is.NoErr(err)
+
+	str, err := es.js.Stream(ctx, es.stream)
+	is.NoErr(err)
+	raw, err := str.GetMsg(ctx, seq)
+	is.NoErr(err)
+
+	is.Equal(raw.Subject, "$ES.store.order.1.order-placed")
+	is.Equal(raw.Header.Get(eventCodecHdr), "binary")
+	is.Equal(raw.Header.Get(eventTypeHdr), "order-placed")
+	is.Equal(raw.Header.Get(eventEntityHdr), "order.1")
+	is.Equal(raw.Data, []byte("payload"))
+
+	// Values implementing encoding.BinaryMarshaler serialize via MarshalBinary.
+	seq, err = es.Append(ctx, []*Event{{Entity: "order.1", Type: "order-shipped", Data: binValue{b: []byte{0x01, 0x02}}}})
+	is.NoErr(err)
+	raw, err = str.GetMsg(ctx, seq)
+	is.NoErr(err)
+	is.Equal(raw.Header.Get(eventCodecHdr), "binary")
+	is.Equal(raw.Data, []byte{0x01, 0x02})
+
+	// Consumed events surface Data as []byte — the shape callers assert on.
+	var events eventSlice
+	_, err = es.Evolve(ctx, &events)
+	is.NoErr(err)
+	is.Equal(len(events), 2)
+	b, ok := events[0].Data.([]byte)
+	is.True(ok)
+	is.Equal(b, []byte("payload"))
+}
+
 func TestWithAPIPrefix(t *testing.T) {
 	is := testutil.NewIs(t)
 
