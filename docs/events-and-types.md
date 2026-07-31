@@ -91,6 +91,11 @@ optional dotted segments). `NewRegistry` validates every type up front — that
 `Init` returns a non-nil pointer to a struct and that a value round-trips
 through the codec — so misconfiguration fails at startup, not at runtime.
 
+For event types, use the undotted form: the name becomes the event subject's
+final token, so a dotted name is rejected at append with `ErrEventTypeInvalid` —
+it would inject extra subject tokens that per-type filters and `Expect` patterns
+cannot address.
+
 The registry serializes events; command payload types do not need to be
 registered, since [commands](./deciders-and-evolvers.md#commands) are never
 serialized.

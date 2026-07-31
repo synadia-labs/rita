@@ -171,6 +171,11 @@ func TestNoRegistryWireCompat(t *testing.T) {
 	_, err = es.Append(ctx, []*Event{{Entity: "order.1", Data: []byte("x")}})
 	is.Err(err, ErrEventTypeRequired)
 
+	// Nor may the type carry subject syntax — it becomes the subject's final
+	// token, so a wildcard or separator would leak into the published subject.
+	_, err = es.Append(ctx, []*Event{{Entity: "order.1", Type: "order.*", Data: []byte("x")}})
+	is.Err(err, ErrEventTypeInvalid)
+
 	seq, err := es.Append(ctx, []*Event{{Entity: "order.1", Type: "order-placed", Data: []byte("payload")}})
 	is.NoErr(err)
 
@@ -928,6 +933,49 @@ func TestEntityValidation(t *testing.T) {
 	} {
 		is.True(!validEntity(bad))
 	}
+}
+
+// TestTypeValidation pins that the event type must be exactly one subject
+// token: it becomes the published subject's final token, so a separator,
+// wildcard, or whitespace would inject subject tokens, hide the event from
+// three-token filter patterns, and misalign the default Expect pattern.
+func TestTypeValidation(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	for _, good := range []string{"order-placed", "OrderPlaced", "v2_order"} {
+		is.True(validType(good))
+	}
+
+	for _, bad := range []string{
+		"",              // empty
+		"order.placed",  // separator: injects a subject token
+		"order*",        // wildcard
+		">",             // wildcard
+		"order placed",  // whitespace
+		"order\tplaced", // whitespace
+	} {
+		is.True(!validType(bad))
+	}
+}
+
+// TestDottedRegistryTypeRejected pins the conflict decision between the type
+// registry's name rules (dots allowed) and the subject grammar (the type is
+// one token): a dotted registered type is rejected at append rather than
+// published on a subject that three-token filters and Expect patterns cannot
+// address.
+func TestDottedRegistryTypeRejected(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	reg, err := types.NewRegistry(map[string]*types.Type{
+		"com.example.order-placed": {Init: func() any { return &OrderPlaced{} }},
+	})
+	is.NoErr(err)
+
+	es := storeHandle("demo")
+	es.types = registryTypes{r: reg}
+
+	_, err = es.wrapEvent(&Event{Entity: "order.1", Data: &OrderPlaced{}})
+	is.Err(err, ErrEventTypeInvalid)
 }
 
 // TestUpdateMergesCustomMetadata pins that an update preserves custom metadata
