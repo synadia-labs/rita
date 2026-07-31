@@ -18,7 +18,6 @@ import (
 	"github.com/synadia-labs/rita/clock"
 	"github.com/synadia-labs/rita/codec"
 	"github.com/synadia-labs/rita/id"
-	"github.com/synadia-labs/rita/types"
 )
 
 const (
@@ -311,7 +310,7 @@ type EventStore struct {
 
 	id     id.ID
 	clock  clock.Clock
-	types  *types.Registry
+	types  typeRegistry
 	logger *slog.Logger
 }
 
@@ -365,22 +364,11 @@ func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 		return nil, ErrEventEntityInvalid
 	}
 
-	if s.types == nil {
-		if event.Type == "" {
-			return nil, ErrEventTypeRequired
-		}
-	} else {
-		t, err := s.types.Lookup(event.Data)
-		if err != nil {
-			return nil, err
-		}
-
-		if event.Type == "" {
-			event.Type = t
-		} else if event.Type != t {
-			return nil, fmt.Errorf("wrong type for event data: %s", event.Type)
-		}
+	t, err := s.types.resolveType(event.Type, event.Data)
+	if err != nil {
+		return nil, err
 	}
+	event.Type = t
 
 	// Set ID if empty.
 	if event.ID == "" {
@@ -400,19 +388,7 @@ func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 // without the data as an optimization for some use cases.
 func (s *EventStore) packEvent(subject string, event *Event) (*nats.Msg, error) {
 	// Marshal the data.
-	var (
-		data      []byte
-		err       error
-		codecName string
-	)
-
-	if s.types == nil {
-		data, err = codec.Binary.Marshal(event.Data)
-		codecName = codec.Binary.Name()
-	} else {
-		data, err = s.types.Marshal(event.Data)
-		codecName = s.types.Codec().Name()
-	}
+	data, codecName, err := s.types.marshal(event.Data)
 	if err != nil {
 		return nil, err
 	}
@@ -457,27 +433,12 @@ func (s *EventStore) unpackEventFrom(subject string, seq uint64, headers nats.He
 	eventType := headers.Get(eventTypeHdr)
 	codecName := headers.Get(eventCodecHdr)
 
-	var (
-		val any
-		err error
-	)
-
 	c, ok := codec.Codecs[codecName]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", codec.ErrCodecNotRegistered, codecName)
 	}
 
-	// No type registry, so assume byte slice.
-	if s.types == nil {
-		var b []byte
-		err = c.Unmarshal(data, &b)
-		val = b
-	} else {
-		val, err = s.types.Init(eventType)
-		if err == nil {
-			err = c.Unmarshal(data, val)
-		}
-	}
+	val, err := s.types.unmarshal(c, eventType, data)
 	if err != nil {
 		return nil, err
 	}

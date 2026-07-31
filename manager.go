@@ -56,10 +56,13 @@ type ManagerOption interface {
 	addOption(o *Manager) error
 }
 
-// WithRegistry sets an explicit type registry.
+// WithRegistry sets an explicit type registry. A nil registry keeps the
+// default binary mode, matching the historical nil-field behavior.
 func WithRegistry(types *types.Registry) ManagerOption {
 	return managerOption(func(o *Manager) error {
-		o.types = types
+		if types != nil {
+			o.types = registryTypes{r: types}
+		}
 		return nil
 	})
 }
@@ -184,7 +187,7 @@ type Manager struct {
 	logger    *slog.Logger
 	js        jetstream.JetStream
 	apiPrefix string
-	types     *types.Registry
+	types     typeRegistry
 	id        id.ID
 	clock     clock.Clock
 }
@@ -292,6 +295,9 @@ func New(nc *nats.Conn, opts ...ManagerOption) (*Manager, error) {
 		logger: slog.Default(),
 		id:     id.NUID,
 		clock:  clock.Time,
+		// Default degenerate registry: caller-owned type names, raw []byte
+		// bodies via the binary codec. WithRegistry replaces it.
+		types: binaryTypes{},
 	}
 
 	for _, o := range opts {
