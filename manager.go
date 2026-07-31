@@ -98,8 +98,9 @@ func WithAPIPrefix(apiPrefix string) ManagerOption {
 // eventSubject builds the fully-qualified subject for an event, scoped to this
 // store and (when the handle is tenant-scoped) its tenant. It funnels through
 // subjectPrefix so the untenanted form stays byte-identical to
-// "$ES.<name>.<entity>.<type>".
-func (s *EventStore) eventSubject(event *Event) string {
+// "$ES.<name>.<entity>.<type>" and an unscoped tenant-mode handle gets
+// ErrTenantRequired.
+func (s *EventStore) eventSubject(event *Event) (string, error) {
 	return s.subjectPrefix(event.Entity + "." + event.Type)
 }
 

@@ -100,15 +100,13 @@ func (c *ReactorConfig) applyDefaults() {
 }
 
 // prepareReactorConfig runs the preamble shared by the mutating reactor
-// operations — validation, tenant guard, defaults, and projection to the
-// consumer config — so a check added for one operation cannot be forgotten
-// by the others.
+// operations — validation, defaults, and projection to the consumer config —
+// so a check added for one operation cannot be forgotten by the others. The
+// tenant guard is enforced structurally by filtersToSubjects inside
+// reactorConsumerConfig.
 func (s *EventStore) prepareReactorConfig(cfg ReactorConfig) (jetstream.ConsumerConfig, error) {
 	if cfg.Name == "" {
 		return jetstream.ConsumerConfig{}, ErrReactorNameRequired
-	}
-	if err := s.requireTenant(); err != nil {
-		return jetstream.ConsumerConfig{}, err
 	}
 	cfg.applyDefaults()
 	return s.reactorConsumerConfig(cfg)
@@ -252,6 +250,8 @@ func (s *EventStore) DeleteReactor(ctx context.Context, name string) error {
 	if name == "" {
 		return ErrReactorNameRequired
 	}
+	// Deletes by durable name and never builds a subject, so the structural
+	// guard in subject construction cannot cover it — check explicitly.
 	if err := s.requireTenant(); err != nil {
 		return err
 	}
@@ -343,7 +343,10 @@ func (s *EventStore) reactorInTenantScope(filterSubjects []string) bool {
 	if len(filterSubjects) == 0 {
 		return false
 	}
-	prefix := s.subjectPrefix("")
+	// Membership check, not subject construction: s.tenant is non-empty here,
+	// so read the scoped prefix directly instead of threading subjectPrefix's
+	// (here impossible) ErrTenantRequired.
+	prefix := s.prefix
 	for _, fs := range filterSubjects {
 		if !strings.HasPrefix(fs, prefix) {
 			return false
