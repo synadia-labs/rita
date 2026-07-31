@@ -10,7 +10,6 @@ import (
 var (
 	ErrEvolverNotImplemented = errors.New("evolver not implemented")
 	ErrDeciderNotImplemented = errors.New("decider not implemented")
-	ErrViewerNotImplemented  = errors.New("viewer not implemented")
 )
 
 type Expect struct {
