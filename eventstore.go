@@ -36,6 +36,7 @@ var (
 	ErrEventEntityRequired    = errors.New("rita: event entity required")
 	ErrEventEntityInvalid     = errors.New("rita: event entity invalid")
 	ErrEventTypeRequired      = errors.New("rita: event type required")
+	ErrEventTypeInvalid       = errors.New("rita: event type invalid")
 	ErrNoEvents               = errors.New("rita: no events provided")
 	ErrEventStoreNameRequired = errors.New("rita: event store name is required")
 	ErrSubjectTooManyTokens   = errors.New("rita: subject can have at most three tokens")
@@ -83,6 +84,23 @@ func validEntity(entity string) bool {
 		}
 	}
 	return dot > 0 && dot < len(entity)-1
+}
+
+// validType reports whether t is exactly one subject token — the type is the
+// published subject's final token, so a separator, wildcard, or whitespace
+// would inject tokens into the subject, hide the event from the three-token
+// filter patterns, and misalign the default Expect pattern (which cuts the
+// subject at its last dot). Note this is stricter than types.Registry's name
+// rules, which permit dotted names: the subject grammar wins, so a dotted
+// registered type is rejected here at append rather than published broken.
+func validType(t string) bool {
+	for i := 0; i < len(t); i++ {
+		switch t[i] {
+		case '.', '*', '>', ' ', '\t', '\n', '\f', '\r':
+			return false
+		}
+	}
+	return len(t) > 0
 }
 
 // parsePattern parses a subject pattern into the full form with exactly three tokens.
@@ -367,6 +385,9 @@ func (s *EventStore) wrapEvent(event *Event) (*Event, error) {
 	t, err := s.types.resolveType(event.Type, event.Data)
 	if err != nil {
 		return nil, err
+	}
+	if !validType(t) {
+		return nil, fmt.Errorf("%w: %q", ErrEventTypeInvalid, t)
 	}
 	event.Type = t
 
