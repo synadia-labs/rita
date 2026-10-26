@@ -2,6 +2,7 @@ package rita
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -68,6 +69,39 @@ func TestModel_Decide_AutoExpect(t *testing.T) {
 	events, err = m.Decide(ctx, &Command{Data: "test"})
 	is.NoErr(err)
 	is.Equal(events[0].Expect.Sequence, uint64(5))
+}
+
+type failingCounter struct {
+	Count  int
+	failOn uint64
+}
+
+func (c *failingCounter) Evolve(ctx context.Context, event *Event) error {
+	if event.Sequence() == c.failOn {
+		return errEvolverRejected
+	}
+	c.Count++
+	return nil
+}
+
+func (c *failingCounter) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
+	return []*Event{{Entity: "counter.1", Data: cmd.Data}}, nil
+}
+
+var errEvolverRejected = errors.New("evolve failed")
+
+func TestModel_FailedEvolve_DecideExpectsLastAppliedSequence(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&failingCounter{failOn: 2})
+
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}))
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
+
+	events, err := m.Decide(ctx, &Command{Data: "test"})
+	is.NoErr(err)
+	is.Equal(events[0].Expect.Sequence, uint64(1))
 }
 
 func TestModel_NotImplemented(t *testing.T) {

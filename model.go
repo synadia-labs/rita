@@ -155,9 +155,12 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 		return nil
 	}
 
-	m.lseq[event.Entity] = event.sequence
+	if err := m.e.Evolve(ctx, event); err != nil {
+		return err
+	}
 
-	return m.e.Evolve(ctx, event)
+	m.lseq[event.Entity] = event.sequence
+	return nil
 }
 
 func (m *Model[T]) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
