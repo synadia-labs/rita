@@ -104,6 +104,41 @@ func TestModel_FailedEvolve_DecideExpectsLastAppliedSequence(t *testing.T) {
 	is.Equal(events[0].Expect.Sequence, uint64(1))
 }
 
+func TestModel_FailedEvolve_RecordsFailure(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&failingCounter{failOn: 2})
+
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}))
+	is.NoErr(m.evolveFailure())
+
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
+	is.Err(m.evolveFailure(), ErrEvolveFailed)
+	is.Err(m.evolveFailure(), errEvolverRejected)
+}
+
+func TestModel_RepeatedFailedEvolve_KeepsFirstCause(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&failingCounter{failOn: 1})
+
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}), errEvolverRejected)
+	m.e = evolverFunc(func(context.Context, *Event) error { return errLaterFailure })
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errLaterFailure)
+
+	err := m.evolveFailure()
+	is.Err(err, errEvolverRejected)
+	is.True(!errors.Is(err, errLaterFailure))
+}
+
+var errLaterFailure = errors.New("later failure")
+
+type evolverFunc func(context.Context, *Event) error
+
+func (f evolverFunc) Evolve(ctx context.Context, e *Event) error { return f(ctx, e) }
+
 func TestModel_NotImplemented(t *testing.T) {
 	is := testutil.NewIs(t)
 

@@ -3,6 +3,7 @@ package rita
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 var (
 	ErrEvolverNotImplemented = errors.New("evolver not implemented")
 	ErrDeciderNotImplemented = errors.New("decider not implemented")
+	ErrEvolveFailed          = errors.New("model has a failed evolve")
 )
 
 type Expect struct {
@@ -139,6 +141,8 @@ type Model[T any] struct {
 	// "<entity-type>.<entity-id>" string.
 	lseq map[string]uint64
 
+	evolveErr error
+
 	mu sync.RWMutex
 }
 
@@ -156,6 +160,7 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 	}
 
 	if err := m.e.Evolve(ctx, event); err != nil {
+		m.recordEvolveErr(err)
 		return err
 	}
 
@@ -211,4 +216,19 @@ func NewModel[T any](t T) *Model[T] {
 	m.lseq = make(map[string]uint64)
 
 	return m
+}
+
+func (m *Model[T]) recordEvolveErr(err error) {
+	if m.evolveErr == nil {
+		m.evolveErr = err
+	}
+}
+
+func (m *Model[T]) evolveFailure() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.evolveErr == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrEvolveFailed, m.evolveErr)
 }
