@@ -143,6 +143,8 @@ type Model[T any] struct {
 
 	evolveErr error
 
+	snap *snapshotBinding
+
 	mu sync.RWMutex
 }
 
@@ -153,14 +155,20 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.snap != nil {
+		m.recordEvolveErrLocked(ErrEvolvedOutsideStore)
+	}
+	return m.applyLocked(ctx, event)
+}
 
+func (m *Model[T]) applyLocked(ctx context.Context, event *Event) error {
 	// Already applied
 	if m.lseq[event.Entity] >= event.sequence {
 		return nil
 	}
 
 	if err := m.e.Evolve(ctx, event); err != nil {
-		m.recordEvolveErr(err)
+		m.recordEvolveErrLocked(err)
 		return err
 	}
 
@@ -218,7 +226,7 @@ func NewModel[T any](t T) *Model[T] {
 	return m
 }
 
-func (m *Model[T]) recordEvolveErr(err error) {
+func (m *Model[T]) recordEvolveErrLocked(err error) {
 	if m.evolveErr == nil {
 		m.evolveErr = err
 	}
@@ -231,4 +239,10 @@ func (m *Model[T]) evolveFailure() error {
 		return nil
 	}
 	return fmt.Errorf("%w: %w", ErrEvolveFailed, m.evolveErr)
+}
+
+func (m *Model[T]) recordEvolveErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordEvolveErrLocked(err)
 }
