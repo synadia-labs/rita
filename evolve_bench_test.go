@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/synadia-io/orbit.go/jetstreamext"
+	"github.com/synadia-labs/rita/codec"
 )
 
 // countingEvolver is a minimal Evolver so the benchmarks measure replay
@@ -156,4 +157,67 @@ func BenchmarkEvolveReplay(b *testing.B) {
 			return directGetReplay(ctx, es, m, "order.7")
 		})
 	})
+}
+
+func BenchmarkSnapshotRecovery(b *testing.B) {
+	for _, entities := range []int{1, 100} {
+		b.Run(fmt.Sprintf("entities=%d", entities), func(b *testing.B) {
+			es := newTestStore(b)
+			ctx := context.Background()
+			for off := 0; off < 5000; off += 500 {
+				events := make([]*Event, 500)
+				for i := range events {
+					events[i] = &Event{Entity: fmt.Sprintf("order.%d", (off+i)%entities), Data: &OrderPlaced{}}
+				}
+				if _, err := es.Append(ctx, events); err != nil {
+					b.Fatal(err)
+				}
+			}
+			cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
+			m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := m.SaveSnapshot(ctx); err != nil {
+				b.Fatal(err)
+			}
+			entry, err := m.snap.kv.Get(ctx, m.snap.key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Logf("snapshot value: %d bytes", len(entry.Value()))
+			for range 10 {
+				if _, err := es.Append(ctx, []*Event{{Entity: "order.0", Data: &OrderPlaced{}}}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			for _, snapshot := range []bool{false, true} {
+				name := "full-replay"
+				if snapshot {
+					name = "snapshot-plus-tail"
+				}
+				b.Run(name, func(b *testing.B) {
+					b.ReportAllocs()
+					for b.Loop() {
+						state := &entityCounter{Counts: map[string]int{}}
+						if snapshot {
+							_, err = LoadModel(ctx, es, state, cfg)
+						} else {
+							_, err = es.Evolve(ctx, NewModel(state))
+						}
+						if err != nil {
+							b.Fatal(err)
+						}
+						var total int
+						for _, n := range state.Counts {
+							total += n
+						}
+						if total != 5010 || state.Counts["order.0"] != 5000/entities+10 {
+							b.Fatalf("incorrect recovered state: total=%d order.0=%d", total, state.Counts["order.0"])
+						}
+					}
+				})
+			}
+		})
+	}
 }

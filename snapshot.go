@@ -2,13 +2,19 @@ package rita
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -19,6 +25,13 @@ var (
 	ErrSnapshotSkipsEvents   = errors.New("rita: start sequence would skip events the model has not applied")
 	ErrModelBusy             = errors.New("rita: model is already being evolved or watched by the store")
 	ErrEvolvedOutsideStore   = errors.New("rita: snapshot-bound model was evolved outside the event store")
+	ErrSnapshotNotConfigured = errors.New("rita: model has no snapshot binding")
+	ErrSnapshotInvalid       = errors.New("rita: invalid snapshot")
+	ErrSnapshotStale         = errors.New("rita: snapshot belongs to a different stream history")
+	ErrSnapshotHistoryGap    = errors.New("rita: event history after snapshot has been removed")
+	ErrSnapshotConflict      = errors.New("rita: concurrent snapshot save conflict")
+
+	snapshotBucketRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 )
 
 type SnapshotConfig struct {
@@ -39,15 +52,33 @@ func LoadModel[T any](ctx context.Context, store *EventStore, initial T, config 
 
 	m := NewModel(initial)
 	m.snap = &snapshotBinding{
-		stream:  store.stream,
-		tenant:  store.tenant,
+		store:   store,
 		config:  config,
 		filters: filters,
+	}
+
+	info, err := m.snap.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m.snap.created = info.Created
+	env, _, err := m.snap.read(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+	if env != nil {
+		if err := config.Codec.Unmarshal(env.State, m.t); err != nil {
+			return nil, fmt.Errorf("%w: decode state: %w", ErrSnapshotInvalid, err)
+		}
+		m.lseq, m.snap.cursor = env.Sequences, env.Cursor
+	} else {
+		m.snap.cursor = max(info.State.FirstSeq, 1) - 1
 	}
 
 	if _, err := store.Evolve(ctx, m); err != nil {
 		return nil, err
 	}
+	m.snap.cursor = max(m.snap.cursor, info.State.LastSeq)
 	return m, nil
 }
 
@@ -69,12 +100,175 @@ func validateSnapshotConfig(initial any, config SnapshotConfig) error {
 }
 
 type snapshotBinding struct {
-	stream  string
-	tenant  string
+	store   *EventStore
+	kv      jetstream.KeyValue
+	key     string
+	created time.Time
 	config  SnapshotConfig
 	filters []string
 	cursor  uint64
 	claim   modelClaim
+}
+
+type snapshotIdentity struct {
+	Stream  string
+	Tenant  string
+	Name    string
+	Version string
+	Codec   string
+	Filters []string
+}
+
+type snapshotEnvelope struct {
+	Identity  snapshotIdentity
+	Created   time.Time
+	Cursor    uint64
+	Sequences map[string]uint64
+	State     []byte
+}
+
+func (b *snapshotBinding) identity() snapshotIdentity {
+	return snapshotIdentity{b.store.stream, b.store.tenant, b.config.Name, b.config.Version, b.config.Codec.Name(), b.filters}
+}
+
+func snapshotBucket(storeName string) (string, error) {
+	bucket := "ES_SNAP_" + storeName
+	if !snapshotBucketRegex.MatchString(bucket) {
+		return "", fmt.Errorf("%w: store name %q cannot form a snapshot bucket name", ErrSnapshotConfigInvalid, storeName)
+	}
+	return bucket, nil
+}
+
+func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, error) {
+	if err := b.store.requireTenant(); err != nil {
+		return nil, err
+	}
+	bucket, err := snapshotBucket(b.store.name)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := b.store.js.Stream(ctx, b.store.stream)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot stream: %w", err)
+	}
+	info := stream.CachedInfo()
+	b.kv, err = b.store.js.KeyValue(ctx, bucket)
+	if errors.Is(err, jetstream.ErrBucketNotFound) {
+		b.kv, err = b.store.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: bucket, Storage: info.Config.Storage, Replicas: info.Config.Replicas, History: 1,
+		})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot bucket: %w", err)
+	}
+	identity, err := json.Marshal(b.identity())
+	if err != nil {
+		return nil, err
+	}
+	b.key = fmt.Sprintf("%x", sha256.Sum256(identity))
+	return info, nil
+}
+
+func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) (*snapshotEnvelope, uint64, error) {
+	entry, err := b.kv.Get(ctx, b.key)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("read snapshot: %w", err)
+	}
+	var env snapshotEnvelope
+	if err := json.Unmarshal(entry.Value(), &env); err != nil {
+		return nil, 0, fmt.Errorf("%w: decode envelope: %w", ErrSnapshotInvalid, err)
+	}
+	switch {
+	case !reflect.DeepEqual(env.Identity, b.identity()):
+		return nil, 0, fmt.Errorf("%w: identity does not match binding", ErrSnapshotInvalid)
+	case env.Sequences == nil:
+		return nil, 0, fmt.Errorf("%w: missing entity sequences", ErrSnapshotInvalid)
+	}
+	if !env.Created.Equal(info.Created) || env.Cursor > info.State.LastSeq {
+		return nil, 0, ErrSnapshotStale
+	}
+	for entity, seq := range env.Sequences {
+		if !validEntity(entity) {
+			return nil, 0, fmt.Errorf("%w: invalid entity %q", ErrSnapshotInvalid, entity)
+		}
+		if seq > info.State.LastSeq {
+			return nil, 0, ErrSnapshotStale
+		}
+	}
+	return &env, entry.Revision(), nil
+}
+
+func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
+	b := m.snap
+	if b == nil {
+		return ErrSnapshotNotConfigured
+	}
+	candidate, err := m.captureSnapshot()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(candidate)
+	if err != nil {
+		return fmt.Errorf("encode snapshot: %w", err)
+	}
+	stream, err := b.store.js.Stream(ctx, b.store.stream)
+	if err != nil {
+		return fmt.Errorf("snapshot stream: %w", err)
+	}
+	info := stream.CachedInfo()
+	if !b.created.Equal(info.Created) || candidate.Cursor > info.State.LastSeq {
+		return ErrSnapshotStale
+	}
+	previous, revision, err := b.read(ctx, info)
+	if err != nil {
+		return err
+	}
+	if previous != nil && previous.Cursor >= candidate.Cursor {
+		return nil
+	}
+	return b.write(ctx, info, data, candidate.Cursor, revision)
+}
+
+func (m *Model[T]) captureSnapshot() (snapshotEnvelope, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if err := m.evolveFailureLocked(); err != nil {
+		return snapshotEnvelope{}, err
+	}
+	state, err := m.snap.config.Codec.Marshal(m.t)
+	if err != nil {
+		return snapshotEnvelope{}, fmt.Errorf("encode snapshot state: %w", err)
+	}
+	return snapshotEnvelope{
+		Identity: m.snap.identity(), Created: m.snap.created,
+		Cursor: m.snap.cursor, Sequences: maps.Clone(m.lseq), State: state,
+	}, nil
+}
+
+func (b *snapshotBinding) write(ctx context.Context, info *jetstream.StreamInfo, data []byte, cursor, revision uint64) error {
+	var err error
+	if revision == 0 {
+		_, err = b.kv.Create(ctx, b.key, data)
+	} else {
+		_, err = b.kv.Update(ctx, b.key, data, revision)
+	}
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, jetstream.ErrKeyExists) || errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
+		previous, _, readErr := b.read(ctx, info)
+		if readErr != nil {
+			return readErr
+		}
+		if previous != nil && previous.Cursor >= cursor {
+			return nil
+		}
+		return fmt.Errorf("%w: %w", ErrSnapshotConflict, err)
+	}
+	return fmt.Errorf("save snapshot: %w", err)
 }
 
 func normalizeFilters(filters []string) ([]string, error) {
@@ -147,9 +341,9 @@ func (b *snapshotBinding) resolve(cursor uint64, o *options) error {
 }
 
 func (b *snapshotBinding) checkStore(s *EventStore) error {
-	if s.stream != b.stream || s.tenant != b.tenant {
+	if s.stream != b.store.stream || s.tenant != b.store.tenant {
 		return fmt.Errorf("%w: bound to stream %q tenant %q, used with stream %q tenant %q",
-			ErrSnapshotWrongStore, b.stream, b.tenant, s.stream, s.tenant)
+			ErrSnapshotWrongStore, b.store.stream, b.store.tenant, s.stream, s.tenant)
 	}
 	return nil
 }
@@ -161,6 +355,13 @@ type orderedPath struct {
 	model   snapshotEvolver
 	halted  atomic.Bool
 	stopped atomic.Bool
+}
+
+func (p *orderedPath) checkHistory(info *jetstream.ConsumerInfo) error {
+	if p.model != nil && info.Delivered.Stream > p.model.snapshotCursor() {
+		return ErrSnapshotHistoryGap
+	}
+	return nil
 }
 
 func (p *orderedPath) stop() {

@@ -614,6 +614,9 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	defer func() {
 		_ = s.js.DeleteConsumer(ctx, s.stream, info.Name)
 	}()
+	if err := path.checkHistory(info); err != nil {
+		return 0, err
+	}
 
 	pending := info.NumPending
 	if pending == 0 {
@@ -797,6 +800,11 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 
 	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
+		path.claim.release(path.gen)
+		return nil, err
+	}
+	if err := path.checkHistory(con.CachedInfo()); err != nil {
+		_ = s.js.DeleteConsumer(ctx, s.stream, con.CachedInfo().Name)
 		path.claim.release(path.gen)
 		return nil, err
 	}

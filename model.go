@@ -235,6 +235,10 @@ func (m *Model[T]) recordEvolveErrLocked(err error) {
 func (m *Model[T]) evolveFailure() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.evolveFailureLocked()
+}
+
+func (m *Model[T]) evolveFailureLocked() error {
 	if m.evolveErr == nil {
 		return nil
 	}
