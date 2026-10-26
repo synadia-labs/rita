@@ -1,8 +1,10 @@
 package rita
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -365,6 +367,33 @@ func TestSnapshotWatch_UndecodableEventHaltsBoundWatcher(t *testing.T) {
 	is.Equal(bound.snapshotCursor(), uint64(0))
 	is.Err(bound.evolveFailure(), codec.ErrCodecNotRegistered)
 	is.Err(bound.SaveSnapshot(ctx), codec.ErrCodecNotRegistered)
+	is.Equal(reported.Load(), int32(1))
+}
+
+func TestSnapshotWatch_EvolveErrorHaltsBoundWatcher(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	bound, err := LoadModel(ctx, es, failsIfReplayed(1), SnapshotConfig{
+		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
+	})
+	is.NoErr(err)
+
+	var reported atomic.Int32
+	w, err := es.Watch(ctx, bound, WithErrHandler(func(error, *Event, jetstream.Msg) { reported.Add(1) }))
+	is.NoErr(err)
+	defer w.Stop()
+
+	appendOrderEvents(t, es, "order.1", "order.2")
+
+	waitFor(t, 2*time.Second, func() bool { return reported.Load() == 1 })
+	time.Sleep(100 * time.Millisecond)
+
+	is.Equal(counts(t, bound), map[string]int{})
+	is.Equal(bound.snapshotCursor(), uint64(0))
+	is.Err(bound.evolveFailure(), errEvolverRejected)
+	is.Err(bound.SaveSnapshot(ctx), errEvolverRejected)
 	is.Equal(reported.Load(), int32(1))
 }
 
@@ -811,6 +840,33 @@ func TestSnapshotLoad_CodecsRestoreIntoOriginalState(t *testing.T) {
 		is.NoErr(err)
 		is.Equal(state.Value, int64(0))
 	})
+	t.Run("user codec", func(t *testing.T) {
+		is := testutil.NewIs(t)
+		cfg := SnapshotConfig{Name: "tagged", Codec: taggedCodec{}}
+		m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+		is.NoErr(err)
+		is.NoErr(m.SaveSnapshot(ctx))
+		restored, err := LoadModel(ctx, es, failsIfReplayed(1), cfg)
+		is.NoErr(err)
+		is.Equal(counts(t, restored), map[string]int{"order.1": 2})
+	})
+}
+
+type taggedCodec struct{}
+
+func (taggedCodec) Name() string { return "tagged" }
+
+func (taggedCodec) Marshal(v any) ([]byte, error) {
+	data, err := json.Marshal(v)
+	return append([]byte("tagged:"), data...), err
+}
+
+func (taggedCodec) Unmarshal(data []byte, v any) error {
+	rest, ok := bytes.CutPrefix(data, []byte("tagged:"))
+	if !ok {
+		return errors.New("missing tag")
+	}
+	return json.Unmarshal(rest, v)
 }
 
 func TestSnapshotDecisions_DoNotNeedSnapshotBucket(t *testing.T) {

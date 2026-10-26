@@ -139,9 +139,14 @@ step.
 > **Partial-failure note.** If the evolve step fails *after* the append
 > succeeded (including a context cancellation between events), the events are
 > already durably stored but the in-memory model has only advanced up to the
-> last successfully-applied event. Recover by calling
-> [`Evolve` with `WithAfterSequence`](./reading-state.md#sequence-windows) to
-> replay the remainder onto the model.
+> last successfully-applied event. Rita does not skip the failed event. The
+> next replay applies it again.
+>
+> Rita cannot undo changes that `Evolve` made before it failed. Make `Evolve`
+> check the event before it changes the state. If the state did not change,
+> call [`Evolve` with `WithAfterSequence`](./reading-state.md#sequence-windows)
+> to apply the remaining events. If the state changed, build a new model.
+> A model from `LoadModel` cannot save after a failure. Load it again.
 
 ## Model
 
@@ -177,6 +182,9 @@ err := model.View(ctx, func(o *Order) error {
 `NewModel` detects which interfaces the wrapped type implements; calling a method
 the type doesn't support returns `ErrDeciderNotImplemented` or
 `ErrEvolverNotImplemented`.
+
+`NewModel` keeps state in memory only. To save state in KV, use
+[`LoadModel` and `SaveSnapshot`](./reading-state.md#snapshots).
 
 ## Optimistic concurrency
 

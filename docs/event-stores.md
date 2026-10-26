@@ -105,7 +105,47 @@ err := mgr.UpdateEventStore(ctx, rita.EventStoreConfig{
 err := mgr.DeleteEventStore(ctx, "orders")
 ```
 
-Deletes the stream and everything in it. This is irreversible.
+Deletes the stream and all its events. You cannot undo this. Rita does **not**
+delete the snapshot bucket. Delete it yourself if you do not need it.
+
+If you create a store with the same name again, Rita does not use the old
+snapshots. `LoadModel` returns `ErrSnapshotStale`. To continue, change
+`Version` or delete the snapshot bucket.
+
+## Snapshot storage
+
+Each store keeps its snapshots in a KV bucket named `ES_SNAP_<store name>`.
+`LoadModel` creates the bucket if it does not exist. Each snapshot config
+has one key in the bucket.
+
+The store name must contain only letters, digits, `-` and `_`. Other names
+cannot make a valid bucket name, and `LoadModel` returns
+`ErrSnapshotConfigInvalid`.
+
+The new bucket uses the same storage type and replica count as the stream. It
+keeps one revision per key and has no TTL. `UpdateEventStore` does not change
+the bucket.
+
+Your credentials need permission to read stream info and to read and write the
+bucket. If your credentials cannot create buckets, create the bucket before
+you start.
+
+Each snapshot must fit in one KV value. The server `max_payload` and the
+bucket `MaxValueSize` set the limit. If a snapshot is too large, the save
+fails and the previous snapshot stays.
+
+Snapshots do not make it safe to remove events from the stream. See
+[When a snapshot is rejected](./reading-state.md#when-a-snapshot-is-rejected).
+
+These errors mean that the code uses the API incorrectly:
+
+| Error | Cause |
+| --- | --- |
+| `ErrSnapshotConfigInvalid` | The state is nil or not a pointer, `Name` or `Codec` is missing, the codec has no name, or the store name is not valid. |
+| `ErrSnapshotNotConfigured` | You called `SaveSnapshot` on a model from `NewModel`. |
+| `ErrSnapshotWrongStore` | You used the model with a different store or tenant. |
+| `ErrSnapshotSkipsEvents` | A start sequence would skip events that the model did not apply. |
+| `ErrModelBusy` | Another `Evolve` or `Watch` already uses the model. |
 
 ## What you do with a store
 
@@ -117,6 +157,7 @@ Once you hold an `*EventStore`, the rest of Rita's API hangs off it:
 | `Decide` / `DecideAndEvolve` | [Deciders & evolvers](./deciders-and-evolvers.md) |
 | `Evolve` state on demand | [Reading state](./reading-state.md#evolve) |
 | `Watch` events live | [Reading state](./reading-state.md#watch) |
+| `LoadModel` / `SaveSnapshot` | [Snapshots](./reading-state.md#snapshots) |
 | Reactor management (`CreateReactor`, …) | [Reactors](./reactors.md) |
 | `Tenant` scoping | [Multi-tenancy](./tenancy.md) |
 

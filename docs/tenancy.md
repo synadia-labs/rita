@@ -84,6 +84,17 @@ Scoping flows through transparently:
 The untenanted code path is byte-for-byte unchanged: on a store created without
 tenancy, subjects and filters look exactly as they would without this feature.
 
+## Snapshots share a bucket
+
+Pass the tenant's store to [`LoadModel`](./reading-state.md#snapshots). Each
+tenant gets its own keys in the store's one snapshot bucket.
+
+Credentials that can read the bucket can read the snapshots of all tenants.
+If tenants must not see each other's data, use separate stores or accounts.
+
+Retention applies to the whole stream. Removed events from one tenant can
+cause `ErrSnapshotHistoryGap` for other tenants.
+
 ## Reactors are stream-global
 
 Tenancy scopes *subjects*, but durable consumer **names** share a single

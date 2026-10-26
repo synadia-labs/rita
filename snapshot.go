@@ -19,17 +19,17 @@ import (
 )
 
 var (
-	ErrSnapshotConfigInvalid = errors.New("rita: snapshot config invalid")
-	ErrSnapshotWrongStore    = errors.New("rita: model is bound to a different event store")
-	ErrSnapshotScopeChanged  = errors.New("rita: filters differ from the snapshot binding")
-	ErrSnapshotSkipsEvents   = errors.New("rita: start sequence would skip events the model has not applied")
-	ErrModelBusy             = errors.New("rita: model is already being evolved or watched by the store")
-	ErrEvolvedOutsideStore   = errors.New("rita: snapshot-bound model was evolved outside the event store")
-	ErrSnapshotNotConfigured = errors.New("rita: model has no snapshot binding")
-	ErrSnapshotInvalid       = errors.New("rita: invalid snapshot")
-	ErrSnapshotStale         = errors.New("rita: snapshot belongs to a different stream history")
-	ErrSnapshotHistoryGap    = errors.New("rita: event history after snapshot has been removed")
-	ErrSnapshotConflict      = errors.New("rita: concurrent snapshot save conflict")
+	ErrSnapshotConfigInvalid = errors.New("rita: snapshot config is not valid")
+	ErrSnapshotWrongStore    = errors.New("rita: model uses a different event store")
+	ErrSnapshotScopeChanged  = errors.New("rita: filters are different from the snapshot filters")
+	ErrSnapshotSkipsEvents   = errors.New("rita: start sequence skips events that the model did not apply")
+	ErrModelBusy             = errors.New("rita: another Evolve or Watch uses this model")
+	ErrEvolvedOutsideStore   = errors.New("rita: snapshot model received events outside the event store")
+	ErrSnapshotNotConfigured = errors.New("rita: model has no snapshot config")
+	ErrSnapshotInvalid       = errors.New("rita: snapshot is not valid")
+	ErrSnapshotStale         = errors.New("rita: snapshot does not match the stream")
+	ErrSnapshotHistoryGap    = errors.New("rita: events after the snapshot are missing from the stream")
+	ErrSnapshotConflict      = errors.New("rita: another writer saved the snapshot at the same time")
 
 	snapshotBucketRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 )
@@ -68,7 +68,7 @@ func LoadModel[T any](ctx context.Context, store *EventStore, initial T, config 
 	}
 	if env != nil {
 		if err := config.Codec.Unmarshal(env.State, m.t); err != nil {
-			return nil, fmt.Errorf("%w: decode state: %w", ErrSnapshotInvalid, err)
+			return nil, fmt.Errorf("%w: cannot decode state: %w", ErrSnapshotInvalid, err)
 		}
 		m.lseq, m.snap.cursor = env.Sequences, env.Cursor
 	} else {
@@ -134,7 +134,7 @@ func (b *snapshotBinding) identity() snapshotIdentity {
 func snapshotBucket(storeName string) (string, error) {
 	bucket := "ES_SNAP_" + storeName
 	if !snapshotBucketRegex.MatchString(bucket) {
-		return "", fmt.Errorf("%w: store name %q cannot form a snapshot bucket name", ErrSnapshotConfigInvalid, storeName)
+		return "", fmt.Errorf("%w: store name %q is not a valid KV bucket name", ErrSnapshotConfigInvalid, storeName)
 	}
 	return bucket, nil
 }
@@ -149,7 +149,7 @@ func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, erro
 	}
 	stream, err := b.store.js.Stream(ctx, b.store.stream)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot stream: %w", err)
+		return nil, fmt.Errorf("read stream info: %w", err)
 	}
 	info := stream.CachedInfo()
 	b.kv, err = b.store.js.KeyValue(ctx, bucket)
@@ -179,20 +179,20 @@ func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) 
 	}
 	var env snapshotEnvelope
 	if err := json.Unmarshal(entry.Value(), &env); err != nil {
-		return nil, 0, fmt.Errorf("%w: decode envelope: %w", ErrSnapshotInvalid, err)
+		return nil, 0, fmt.Errorf("%w: cannot decode stored value: %w", ErrSnapshotInvalid, err)
 	}
 	switch {
 	case !reflect.DeepEqual(env.Identity, b.identity()):
-		return nil, 0, fmt.Errorf("%w: identity does not match binding", ErrSnapshotInvalid)
+		return nil, 0, fmt.Errorf("%w: stored value is for a different snapshot config", ErrSnapshotInvalid)
 	case env.Sequences == nil:
-		return nil, 0, fmt.Errorf("%w: missing entity sequences", ErrSnapshotInvalid)
+		return nil, 0, fmt.Errorf("%w: stored value has no entity sequences", ErrSnapshotInvalid)
 	}
 	if !env.Created.Equal(info.Created) || env.Cursor > info.State.LastSeq {
 		return nil, 0, ErrSnapshotStale
 	}
 	for entity, seq := range env.Sequences {
 		if !validEntity(entity) {
-			return nil, 0, fmt.Errorf("%w: invalid entity %q", ErrSnapshotInvalid, entity)
+			return nil, 0, fmt.Errorf("%w: entity %q is not valid", ErrSnapshotInvalid, entity)
 		}
 		if seq > info.State.LastSeq {
 			return nil, 0, ErrSnapshotStale
@@ -216,7 +216,7 @@ func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
 	}
 	stream, err := b.store.js.Stream(ctx, b.store.stream)
 	if err != nil {
-		return fmt.Errorf("snapshot stream: %w", err)
+		return fmt.Errorf("read stream info: %w", err)
 	}
 	info := stream.CachedInfo()
 	if !b.created.Equal(info.Created) || candidate.Cursor > info.State.LastSeq {
@@ -326,13 +326,13 @@ func (b *snapshotBinding) resolve(cursor uint64, o *options) error {
 			return err
 		}
 		if !slices.Equal(filters, b.filters) {
-			return fmt.Errorf("%w: bound to %v, got %v", ErrSnapshotScopeChanged, b.filters, filters)
+			return fmt.Errorf("%w: snapshot uses %v, got %v", ErrSnapshotScopeChanged, b.filters, filters)
 		}
 	}
 	o.filters = b.filters
 
 	if o.afterSeq != nil && *o.afterSeq > cursor {
-		return fmt.Errorf("%w: model has applied up to %d, asked to start after %d", ErrSnapshotSkipsEvents, cursor, *o.afterSeq)
+		return fmt.Errorf("%w: model applied events up to %d, start sequence is %d", ErrSnapshotSkipsEvents, cursor, *o.afterSeq)
 	}
 	if o.afterSeq == nil {
 		o.afterSeq = &cursor
@@ -342,7 +342,7 @@ func (b *snapshotBinding) resolve(cursor uint64, o *options) error {
 
 func (b *snapshotBinding) checkStore(s *EventStore) error {
 	if s.stream != b.store.stream || s.tenant != b.store.tenant {
-		return fmt.Errorf("%w: bound to stream %q tenant %q, used with stream %q tenant %q",
+		return fmt.Errorf("%w: model uses stream %q tenant %q, got stream %q tenant %q",
 			ErrSnapshotWrongStore, b.store.stream, b.store.tenant, s.stream, s.tenant)
 	}
 	return nil
