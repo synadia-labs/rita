@@ -139,6 +139,85 @@ type evolverFunc func(context.Context, *Event) error
 
 func (f evolverFunc) Evolve(ctx context.Context, e *Event) error { return f(ctx, e) }
 
+type entityCounter struct {
+	Counts map[string]int
+	failOn uint64
+}
+
+func (c *entityCounter) Evolve(ctx context.Context, event *Event) error {
+	if event.Sequence() == c.failOn {
+		return errEvolverRejected
+	}
+	c.Counts[event.Entity]++
+	return nil
+}
+
+func (c *entityCounter) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
+	return []*Event{{Entity: cmd.Data.(string), Data: &OrderPlaced{}}}, nil
+}
+
+func TestModel_InterleavedEntities_TrackSequencesIndependently(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	state := &entityCounter{Counts: map[string]int{}, failOn: 6}
+	m := NewModel(state)
+
+	for _, ev := range []*Event{
+		{Entity: "order.a", sequence: 1},
+		{Entity: "order.b", sequence: 2},
+		{Entity: "order.b", sequence: 3},
+		{Entity: "order.a", sequence: 5},
+		{Entity: "order.b", sequence: 3},
+		{Entity: "order.a", sequence: 1},
+	} {
+		is.NoErr(m.Evolve(ctx, ev))
+	}
+	is.Err(m.Evolve(ctx, &Event{Entity: "order.b", sequence: 6}), errEvolverRejected)
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "order.a", sequence: 7}))
+
+	is.Equal(state.Counts["order.a"], 3)
+	is.Equal(state.Counts["order.b"], 2)
+
+	expect := func(entity string) uint64 {
+		events, err := m.Decide(ctx, &Command{Data: entity})
+		is.NoErr(err)
+		return events[0].Expect.Sequence
+	}
+	is.Equal(expect("order.a"), uint64(7))
+	is.Equal(expect("order.b"), uint64(3))
+	is.Equal(expect("order.c"), uint64(0))
+}
+
+type mutateThenFailCounter struct {
+	Count    int
+	attempts int
+}
+
+func (c *mutateThenFailCounter) Evolve(ctx context.Context, event *Event) error {
+	c.Count++
+	c.attempts++
+	if c.attempts == 1 {
+		return errEvolverRejected
+	}
+	return nil
+}
+
+func TestModel_MutateThenFail_RetryKeepsFailureRecorded(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	state := &mutateThenFailCounter{}
+	m := NewModel(state)
+	ev := &Event{Entity: "counter.1", sequence: 1}
+
+	is.Err(m.Evolve(ctx, ev), errEvolverRejected)
+	is.NoErr(m.Evolve(ctx, ev))
+
+	is.Equal(state.Count, 2)
+	is.Err(m.evolveFailure(), errEvolverRejected)
+}
+
 func TestModel_NotImplemented(t *testing.T) {
 	is := testutil.NewIs(t)
 
