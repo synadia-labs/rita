@@ -1008,3 +1008,42 @@ func TestUpdateMergesCustomMetadata(t *testing.T) {
 	is.Equal(md["tier"], "gold")      // omitted: preserved
 	is.Equal(md["region"], "us-east") // new: added
 }
+
+type flakyCounter struct {
+	Count     int
+	failOnce  uint64
+	attempted map[uint64]int
+}
+
+func (c *flakyCounter) Evolve(_ context.Context, event *Event) error {
+	c.attempted[event.Sequence()]++
+	if event.Sequence() == c.failOnce && c.attempted[event.Sequence()] == 1 {
+		return errEvolverRejected
+	}
+	c.Count++
+	return nil
+}
+
+func TestEvolveReplayReappliesFailedEvent(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := es.Append(ctx, []*Event{
+		{Entity: "order.1", Data: &OrderPlaced{}},
+		{Entity: "order.1", Data: &OrderShipped{}},
+	})
+	is.NoErr(err)
+
+	state := &flakyCounter{failOnce: 2, attempted: map[uint64]int{}}
+	model := NewModel(state)
+
+	_, err = es.Evolve(ctx, model)
+	is.Err(err, errEvolverRejected)
+
+	seq, err := es.Evolve(ctx, model, WithAfterSequence(0))
+	is.NoErr(err)
+	is.Equal(seq, uint64(2))
+	is.Equal(state.attempted[2], 2)
+	is.Equal(state.Count, 2)
+}
