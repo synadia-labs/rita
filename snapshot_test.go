@@ -86,7 +86,7 @@ func TestSnapshotLoadModel_RejectsStoreNameUnfitForBucket(t *testing.T) {
 	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "orders~v1"})
 	is.NoErr(err)
 
-	_, err = LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{Name: "orders", Version: "1", Codec: codec.JSON})
+	_, err = LoadModel(ctx, es, newCounter(), ordersConfig())
 	is.Err(err, ErrSnapshotConfigInvalid)
 }
 
@@ -98,7 +98,7 @@ func TestSnapshotLoadModel_WithoutSnapshotReplaysConfiguredScope(t *testing.T) {
 
 	t.Run("aggregate", func(t *testing.T) {
 		is := testutil.NewIs(t)
-		state := &entityCounter{Counts: map[string]int{}}
+		state := newCounter()
 		m, err := LoadModel(ctx, es, state, SnapshotConfig{
 			Name: "order-1", Version: "1", Filters: []string{"order.1"}, Codec: codec.JSON,
 		})
@@ -109,10 +109,8 @@ func TestSnapshotLoadModel_WithoutSnapshotReplaysConfiguredScope(t *testing.T) {
 
 	t.Run("projection", func(t *testing.T) {
 		is := testutil.NewIs(t)
-		state := &entityCounter{Counts: map[string]int{}}
-		m, err := LoadModel(ctx, es, state, SnapshotConfig{
-			Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-		})
+		state := newCounter()
+		m, err := LoadModel(ctx, es, state, ordersConfig("order"))
 		is.NoErr(err)
 		is.Equal(state.Counts, map[string]int{"order.1": 2, "order.2": 2})
 		is.Equal(nextExpect(t, m, "order.1"), evs[2].Sequence())
@@ -132,9 +130,7 @@ func TestSnapshotBinding_IdentifiesStoreByStreamAndTenant(t *testing.T) {
 
 	tenantA, err := base.Tenant("a")
 	is.NoErr(err)
-	m, err := LoadModel(ctx, tenantA, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, tenantA, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 
 	rederived, err := base.Tenant("a")
@@ -166,9 +162,7 @@ func TestSnapshotBinding_RejectsOptionsThatChangeScopeOrSkipEvents(t *testing.T)
 	ctx := context.Background()
 
 	evs := appendOrderEvents(t, es, "order.1", "user.1", "order.2")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 	cursor := evs[2].Sequence()
 
@@ -200,6 +194,14 @@ func counts(t *testing.T, m *Model[*entityCounter]) map[string]int {
 	return out
 }
 
+func newCounter() *entityCounter {
+	return &entityCounter{Counts: map[string]int{}}
+}
+
+func ordersConfig(filters ...string) SnapshotConfig {
+	return SnapshotConfig{Name: "orders", Version: "1", Filters: filters, Codec: codec.JSON}
+}
+
 func failsIfReplayed(seq uint64) *entityCounter {
 	return &entityCounter{Counts: map[string]int{}, failOn: seq}
 }
@@ -210,9 +212,7 @@ func TestSnapshotWatch_InheritsBindingAndCursor(t *testing.T) {
 	ctx := context.Background()
 
 	appendOrderEvents(t, es, "order.1", "user.1")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 
 	_, err = es.Watch(ctx, m, WithFilters("user"))
@@ -234,9 +234,7 @@ func TestSnapshotWatch_OneStorePathAtATime(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 
 	first, err := es.Watch(ctx, m)
@@ -265,9 +263,7 @@ func TestSnapshotDecideAndEvolve_AdvancesEntityButNotCursor(t *testing.T) {
 	is.NoErr(err)
 
 	appendOrderEvents(t, es, "order.1")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 	cursor := m.snapshotCursor()
 
@@ -297,10 +293,8 @@ func TestSnapshotDecideAndEvolve_FailedEvolveIsRecorded(t *testing.T) {
 	ctx := context.Background()
 
 	evs := appendOrderEvents(t, es, "order.1")
-	state := &entityCounter{Counts: map[string]int{}}
-	m, err := LoadModel(ctx, es, state, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	state := newCounter()
+	m, err := LoadModel(ctx, es, state, ordersConfig("order"))
 	is.NoErr(err)
 	is.NoErr(m.evolveFailure())
 
@@ -318,9 +312,7 @@ func TestSnapshotModel_DirectEvolveIsRecorded(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 
 	is.NoErr(m.Evolve(ctx, &Event{Entity: "order.1", sequence: 1}))
@@ -342,11 +334,9 @@ func TestSnapshotWatch_UndecodableEventHaltsBoundWatcher(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 
-	bound, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	bound, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
-	ordinary := NewModel(&entityCounter{Counts: map[string]int{}})
+	ordinary := NewModel(newCounter())
 
 	var reported atomic.Int32
 	bw, err := es.Watch(ctx, bound, WithErrHandler(func(error, *Event, jetstream.Msg) { reported.Add(1) }))
@@ -375,9 +365,7 @@ func TestSnapshotWatch_EvolveErrorHaltsBoundWatcher(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 
-	bound, err := LoadModel(ctx, es, failsIfReplayed(1), SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	bound, err := LoadModel(ctx, es, failsIfReplayed(1), ordersConfig("order"))
 	is.NoErr(err)
 
 	var reported atomic.Int32
@@ -430,9 +418,7 @@ func TestSnapshotWatch_StopWithBufferedEventsIsNotAFailure(t *testing.T) {
 	ctx := context.Background()
 
 	state := &gatedCounter{Counts: map[string]int{}}
-	m, err := LoadModel(ctx, es, state, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, state, ordersConfig("order"))
 	is.NoErr(err)
 	state.entered, state.gate = make(chan struct{}, 1), make(chan struct{})
 
@@ -458,9 +444,9 @@ func TestSnapshotSave_RestoresStateAndReplaysTail(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
-	cfg := SnapshotConfig{Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON}
+	cfg := ordersConfig("order")
 	appendOrderEvents(t, es, "order.1", "user.1", "order.2", "order.1")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
 	appendOrderEvents(t, es, "order.2", "user.2")
@@ -484,13 +470,13 @@ func TestSnapshotLoad_RejectsTrimmedTail(t *testing.T) {
 			mgr, ctx := newTestManager(t)
 			es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "limited", MaxMsgs: 3})
 			is.NoErr(err)
-			cfg := SnapshotConfig{Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON}
+			cfg := ordersConfig("order")
 			appendOrderEvents(t, es, "order.1")
-			m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+			m, err := LoadModel(ctx, es, newCounter(), cfg)
 			is.NoErr(err)
 			is.NoErr(m.SaveSnapshot(ctx))
 			appendOrderEvents(t, es, tailEntity, tailEntity, tailEntity, tailEntity)
-			_, err = LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+			_, err = LoadModel(ctx, es, newCounter(), cfg)
 			is.Err(err, ErrSnapshotHistoryGap)
 		})
 	}
@@ -500,19 +486,19 @@ func TestSnapshotLoad_EntityAheadOfCursorAppliesSkippedEvents(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
-	cfg := SnapshotConfig{Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON}
+	cfg := ordersConfig("order")
 	appendOrderEvents(t, es, "order.1")
 
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	appendOrderEvents(t, es, "order.2")
 	_, _, err = es.DecideAndEvolve(ctx, m, &Command{Data: "order.1"})
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
 
-	restored, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	restored, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
-	full, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{Name: "orders-full", Version: "1", Filters: []string{"order"}, Codec: codec.JSON})
+	full, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: "orders-full", Version: "1", Filters: []string{"order"}, Codec: codec.JSON})
 	is.NoErr(err)
 	is.Equal(counts(t, restored), counts(t, full))
 	is.Equal(counts(t, restored), map[string]int{"order.1": 2, "order.2": 1})
@@ -528,14 +514,14 @@ func TestSnapshotLoad_EmptyScopeOnTrimmedStreamStaysUsable(t *testing.T) {
 	appendOrderEvents(t, es, "user.1", "user.1", "user.1", "user.1", "user.1")
 	cfg := SnapshotConfig{Name: "invoices", Version: "1", Filters: []string{"invoice"}, Codec: codec.JSON}
 
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	w, err := es.Watch(ctx, m)
 	is.NoErr(err)
 	w.Stop()
 
 	is.NoErr(m.SaveSnapshot(ctx))
-	_, err = LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	_, err = LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 }
 
@@ -543,12 +529,12 @@ func TestSnapshotSave_ConcurrentWritersDoNotRegress(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
-	cfg := SnapshotConfig{Name: "orders", Version: "1", Codec: codec.JSON}
+	cfg := ordersConfig()
 	appendOrderEvents(t, es, "order.1")
-	older, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	older, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	appendOrderEvents(t, es, "order.2", "order.1")
-	newer, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	newer, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(newer.SaveSnapshot(ctx))
 	var wg sync.WaitGroup
@@ -577,10 +563,10 @@ func TestSnapshotSave_ConflictWithOlderWriterIsReported(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
-	cfg := SnapshotConfig{Name: "orders", Version: "1", Codec: codec.JSON}
+	cfg := ordersConfig()
 	load := func() *Model[*entityCounter] {
 		appendOrderEvents(t, es, "order.1")
-		m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+		m, err := LoadModel(ctx, es, newCounter(), cfg)
 		is.NoErr(err)
 		return m
 	}
@@ -611,76 +597,50 @@ func TestSnapshotSave_ConflictWithOlderWriterIsReported(t *testing.T) {
 	is.Equal(stored.Cursor, third.snapshotCursor())
 }
 
-func TestSnapshotLoad_RejectsInvalidEnvelopes(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		edit func(*snapshotEnvelope)
-		want error
-	}{
-		{"identity", func(e *snapshotEnvelope) { e.Identity.Tenant = "other" }, ErrSnapshotInvalid},
-		{"generation", func(e *snapshotEnvelope) { e.Created = time.Time{} }, ErrSnapshotStale},
-		{"future cursor", func(e *snapshotEnvelope) { e.Cursor = 20 }, ErrSnapshotStale},
-		{"future entity", func(e *snapshotEnvelope) { e.Sequences["order.1"] = 20 }, ErrSnapshotStale},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			is := testutil.NewIs(t)
-			es := newTestStore(t)
-			ctx := context.Background()
-			cfg := SnapshotConfig{Name: "orders", Version: "1", Codec: codec.JSON}
-			appendOrderEvents(t, es, "order.1")
-			m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
-			is.NoErr(err)
-			is.NoErr(m.SaveSnapshot(ctx))
-			entry, err := m.snap.kv.Get(ctx, m.snap.key)
-			is.NoErr(err)
-			var env snapshotEnvelope
-			is.NoErr(json.Unmarshal(entry.Value(), &env))
-			tc.edit(&env)
-			data, err := json.Marshal(env)
-			is.NoErr(err)
-			_, err = m.snap.kv.Put(ctx, m.snap.key, data)
-			is.NoErr(err)
-			_, err = LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
-			is.Err(err, tc.want)
-		})
+func editEnvelope(edit func(*snapshotEnvelope)) func(*testing.T, []byte) []byte {
+	return func(t *testing.T, stored []byte) []byte {
+		var env snapshotEnvelope
+		if err := json.Unmarshal(stored, &env); err != nil {
+			t.Fatal(err)
+		}
+		edit(&env)
+		data, err := json.Marshal(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
 	}
 }
 
-func TestSnapshotLoad_RejectsCorruptValues(t *testing.T) {
+func TestSnapshotLoad_RejectsBadStoredValues(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		value func(t *testing.T, stored []byte) []byte
+		name   string
+		tamper func(*testing.T, []byte) []byte
+		want   error
 	}{
-		{"not an envelope", func(*testing.T, []byte) []byte { return []byte("not json") }},
-		{"undecodable state", func(t *testing.T, stored []byte) []byte {
-			var env snapshotEnvelope
-			if err := json.Unmarshal(stored, &env); err != nil {
-				t.Fatal(err)
-			}
-			env.State = []byte("not json")
-			data, err := json.Marshal(env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return data
-		}},
+		{"not an envelope", func(*testing.T, []byte) []byte { return []byte("not json") }, ErrSnapshotInvalid},
+		{"undecodable state", editEnvelope(func(e *snapshotEnvelope) { e.State = []byte("not json") }), ErrSnapshotInvalid},
+		{"identity", editEnvelope(func(e *snapshotEnvelope) { e.Identity.Tenant = "other" }), ErrSnapshotInvalid},
+		{"generation", editEnvelope(func(e *snapshotEnvelope) { e.Created = time.Time{} }), ErrSnapshotStale},
+		{"future cursor", editEnvelope(func(e *snapshotEnvelope) { e.Cursor = 20 }), ErrSnapshotStale},
+		{"future entity", editEnvelope(func(e *snapshotEnvelope) { e.Sequences["order.1"] = 20 }), ErrSnapshotStale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			is := testutil.NewIs(t)
 			es := newTestStore(t)
 			ctx := context.Background()
-			cfg := SnapshotConfig{Name: "orders", Version: "1", Codec: codec.JSON}
+			cfg := ordersConfig()
 			appendOrderEvents(t, es, "order.1")
-			m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+			m, err := LoadModel(ctx, es, newCounter(), cfg)
 			is.NoErr(err)
 			is.NoErr(m.SaveSnapshot(ctx))
 			entry, err := m.snap.kv.Get(ctx, m.snap.key)
 			is.NoErr(err)
-			_, err = m.snap.kv.Put(ctx, m.snap.key, tc.value(t, entry.Value()))
+			_, err = m.snap.kv.Put(ctx, m.snap.key, tc.tamper(t, entry.Value()))
 			is.NoErr(err)
 
-			_, err = LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
-			is.Err(err, ErrSnapshotInvalid)
+			_, err = LoadModel(ctx, es, newCounter(), cfg)
+			is.Err(err, tc.want)
 		})
 	}
 }
@@ -690,7 +650,7 @@ func TestSnapshotSave_RefusesUnsafeModels(t *testing.T) {
 	ctx := context.Background()
 	is.Err(NewModel(&entityCounter{}).SaveSnapshot(ctx), ErrSnapshotNotConfigured)
 	es := newTestStore(t)
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{Name: "orders", Codec: codec.JSON})
+	m, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: "orders", Codec: codec.JSON})
 	is.NoErr(err)
 	is.NoErr(m.Evolve(ctx, &Event{Entity: "order.1", sequence: 1}))
 	is.Err(m.SaveSnapshot(ctx), ErrEvolvedOutsideStore)
@@ -708,11 +668,11 @@ func TestSnapshotLoad_SeparatesTenantsAndVersions(t *testing.T) {
 	is.NoErr(err)
 	appendOrderEvents(t, a, "order.1", "order.1")
 	appendOrderEvents(t, b, "order.1")
-	cfg := SnapshotConfig{Name: "orders", Version: "1", Codec: codec.JSON}
-	m, err := LoadModel(ctx, a, &entityCounter{Counts: map[string]int{}}, cfg)
+	cfg := ordersConfig()
+	m, err := LoadModel(ctx, a, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
-	other, err := LoadModel(ctx, b, &entityCounter{Counts: map[string]int{}}, cfg)
+	other, err := LoadModel(ctx, b, newCounter(), cfg)
 	is.NoErr(err)
 	is.Equal(counts(t, other), map[string]int{"order.1": 1})
 	cfg.Version = "2"
@@ -727,13 +687,13 @@ func TestSnapshotLoad_RecreatedStreamIsStale(t *testing.T) {
 	is.NoErr(err)
 	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
 	appendOrderEvents(t, es, "order.1")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
 	is.NoErr(mgr.DeleteEventStore(ctx, "recreated"))
 	es, err = mgr.CreateEventStore(ctx, EventStoreConfig{Name: "recreated"})
 	is.NoErr(err)
-	_, err = LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	_, err = LoadModel(ctx, es, newCounter(), cfg)
 	is.Err(err, ErrSnapshotStale)
 	is.Err(m.SaveSnapshot(ctx), ErrSnapshotStale)
 }
@@ -746,7 +706,7 @@ func TestSnapshotSave_OversizePreservesPrevious(t *testing.T) {
 	is.NoErr(err)
 	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
 	appendOrderEvents(t, es, "order.1")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
 	for i := range 100 {
@@ -843,7 +803,7 @@ func TestSnapshotLoad_CodecsRestoreIntoOriginalState(t *testing.T) {
 	t.Run("user codec", func(t *testing.T) {
 		is := testutil.NewIs(t)
 		cfg := SnapshotConfig{Name: "tagged", Codec: taggedCodec{}}
-		m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+		m, err := LoadModel(ctx, es, newCounter(), cfg)
 		is.NoErr(err)
 		is.NoErr(m.SaveSnapshot(ctx))
 		restored, err := LoadModel(ctx, es, failsIfReplayed(1), cfg)
@@ -873,7 +833,7 @@ func TestSnapshotDecisions_DoNotNeedSnapshotBucket(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{Name: "orders", Codec: codec.JSON})
+	m, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: "orders", Codec: codec.JSON})
 	is.NoErr(err)
 	is.NoErr(es.js.DeleteKeyValue(ctx, "ES_SNAP_store"))
 	_, _, err = es.Decide(ctx, m, &Command{Data: "order.1"})
@@ -893,7 +853,7 @@ func TestSnapshotSave_LiveWatcher(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	w, err := es.Watch(ctx, m)
 	is.NoErr(err)
@@ -917,7 +877,7 @@ func TestSnapshotSave_LiveWatcher(t *testing.T) {
 		is.NoErr(m.SaveSnapshot(ctx))
 	}
 	is.NoErr(<-appended)
-	restored, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	restored, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.Equal(counts(t, restored), map[string]int{"order.1": 40, "order.2": 20})
 	_, _, err = es.DecideAndEvolve(ctx, restored, &Command{Data: "order.2"})
@@ -929,9 +889,7 @@ func TestSnapshotWatch_RepeatedStopDoesNotStopReplacement(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, SnapshotConfig{
-		Name: "orders", Version: "1", Filters: []string{"order"}, Codec: codec.JSON,
-	})
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 
 	first, err := es.Watch(ctx, m)
@@ -954,7 +912,7 @@ func TestSnapshotLoad_WhileCheckpointAdvances(t *testing.T) {
 	ctx := context.Background()
 	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
 	appendOrderEvents(t, es, "order.1")
-	m, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg)
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
 	errs := make(chan error, 2)
@@ -977,7 +935,7 @@ func TestSnapshotLoad_WhileCheckpointAdvances(t *testing.T) {
 	}()
 	go func() {
 		for range 40 {
-			if _, err := LoadModel(ctx, es, &entityCounter{Counts: map[string]int{}}, cfg); err != nil {
+			if _, err := LoadModel(ctx, es, newCounter(), cfg); err != nil {
 				errs <- err
 				return
 			}

@@ -601,7 +601,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	if err != nil {
 		return 0, err
 	}
-	defer path.claim.release(path.gen)
+	defer path.release()
 
 	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
@@ -800,12 +800,12 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 
 	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
-		path.claim.release(path.gen)
+		path.release()
 		return nil, err
 	}
 	if err := path.checkHistory(con.CachedInfo()); err != nil {
 		_ = s.js.DeleteConsumer(ctx, s.stream, con.CachedInfo().Name)
-		path.claim.release(path.gen)
+		path.release()
 		return nil, err
 	}
 
@@ -859,13 +859,13 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	})
 	if err != nil {
 		wcancel()
-		path.claim.release(path.gen)
+		path.release()
 		return nil, err
 	}
 	if path.claim != nil {
 		go func() {
 			<-conCtx.Closed()
-			path.claim.release(path.gen)
+			path.release()
 		}()
 	}
 

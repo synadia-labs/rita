@@ -90,6 +90,12 @@ func (c *failingCounter) Decide(ctx context.Context, cmd *Command) ([]*Event, er
 
 var errEvolverRejected = errors.New("evolve failed")
 
+func (m *Model[T]) evolveFailure() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.evolveFailureLocked()
+}
+
 func TestModel_FailedEvolve_DecideExpectsLastAppliedSequence(t *testing.T) {
 	is := testutil.NewIs(t)
 

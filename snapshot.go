@@ -61,18 +61,16 @@ func LoadModel[T any](ctx context.Context, store *EventStore, initial T, config 
 	if err != nil {
 		return nil, err
 	}
-	m.snap.created = info.Created
 	env, _, err := m.snap.read(ctx, info)
 	if err != nil {
 		return nil, err
 	}
+	m.snap.cursor = max(info.State.FirstSeq, 1) - 1
 	if env != nil {
 		if err := config.Codec.Unmarshal(env.State, m.t); err != nil {
 			return nil, fmt.Errorf("%w: cannot decode state: %w", ErrSnapshotInvalid, err)
 		}
 		m.lseq, m.snap.cursor = env.Sequences, env.Cursor
-	} else {
-		m.snap.cursor = max(info.State.FirstSeq, 1) - 1
 	}
 
 	if _, err := store.Evolve(ctx, m); err != nil {
@@ -147,11 +145,11 @@ func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, erro
 	if err != nil {
 		return nil, err
 	}
-	stream, err := b.store.js.Stream(ctx, b.store.stream)
+	info, err := b.streamInfo(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read stream info: %w", err)
+		return nil, err
 	}
-	info := stream.CachedInfo()
+	b.created = info.Created
 	b.kv, err = b.store.js.KeyValue(ctx, bucket)
 	if errors.Is(err, jetstream.ErrBucketNotFound) {
 		b.kv, err = b.store.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
@@ -167,6 +165,18 @@ func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, erro
 	}
 	b.key = fmt.Sprintf("%x", sha256.Sum256(identity))
 	return info, nil
+}
+
+func (b *snapshotBinding) streamInfo(ctx context.Context) (*jetstream.StreamInfo, error) {
+	stream, err := b.store.js.Stream(ctx, b.store.stream)
+	if err != nil {
+		return nil, fmt.Errorf("read stream info: %w", err)
+	}
+	return stream.CachedInfo(), nil
+}
+
+func covers(previous *snapshotEnvelope, cursor uint64) bool {
+	return previous != nil && previous.Cursor >= cursor
 }
 
 func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) (*snapshotEnvelope, uint64, error) {
@@ -214,11 +224,10 @@ func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("encode snapshot: %w", err)
 	}
-	stream, err := b.store.js.Stream(ctx, b.store.stream)
+	info, err := b.streamInfo(ctx)
 	if err != nil {
-		return fmt.Errorf("read stream info: %w", err)
+		return err
 	}
-	info := stream.CachedInfo()
 	if !b.created.Equal(info.Created) || candidate.Cursor > info.State.LastSeq {
 		return ErrSnapshotStale
 	}
@@ -226,7 +235,7 @@ func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if previous != nil && previous.Cursor >= candidate.Cursor {
+	if covers(previous, candidate.Cursor) {
 		return nil
 	}
 	return b.write(ctx, info, data, candidate.Cursor, revision)
@@ -263,7 +272,7 @@ func (b *snapshotBinding) write(ctx context.Context, info *jetstream.StreamInfo,
 		if readErr != nil {
 			return readErr
 		}
-		if previous != nil && previous.Cursor >= cursor {
+		if covers(previous, cursor) {
 			return nil
 		}
 		return fmt.Errorf("%w: %w", ErrSnapshotConflict, err)
@@ -366,7 +375,15 @@ func (p *orderedPath) checkHistory(info *jetstream.ConsumerInfo) error {
 
 func (p *orderedPath) stop() {
 	p.stopped.Store(true)
-	p.claim.stop(p.gen)
+	if p.claim != nil {
+		p.claim.stop(p.gen)
+	}
+}
+
+func (p *orderedPath) release() {
+	if p.claim != nil {
+		p.claim.release(p.gen)
+	}
 }
 
 func (p *orderedPath) skip() bool {
@@ -388,14 +405,22 @@ func (p *orderedPath) halt(err error) {
 	p.model.recordEvolveErr(err)
 }
 
-func (s *EventStore) orderedPath(ctx context.Context, model Evolver, o *options) (*orderedPath, error) {
+func (s *EventStore) boundModel(model Evolver) (snapshotEvolver, *snapshotBinding, error) {
 	sm, ok := model.(snapshotEvolver)
 	if !ok || sm.snapshotBinding() == nil {
-		return &orderedPath{evolve: model.Evolve}, nil
+		return nil, nil, nil
 	}
 	b := sm.snapshotBinding()
-	if err := b.checkStore(s); err != nil {
+	return sm, b, b.checkStore(s)
+}
+
+func (s *EventStore) orderedPath(ctx context.Context, model Evolver, o *options) (*orderedPath, error) {
+	sm, b, err := s.boundModel(model)
+	if err != nil {
 		return nil, err
+	}
+	if sm == nil {
+		return &orderedPath{evolve: model.Evolve}, nil
 	}
 	gen, err := b.claim.acquire(ctx)
 	if err != nil {
@@ -442,9 +467,6 @@ func (l *modelClaim) acquire(ctx context.Context) (uint64, error) {
 }
 
 func (l *modelClaim) stop(gen uint64) {
-	if l == nil {
-		return
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.held && l.gen == gen {
@@ -453,9 +475,6 @@ func (l *modelClaim) stop(gen uint64) {
 }
 
 func (l *modelClaim) release(gen uint64) {
-	if l == nil {
-		return
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.held || l.gen != gen {
@@ -466,12 +485,12 @@ func (l *modelClaim) release(gen uint64) {
 }
 
 func (s *EventStore) decisionEvolve(model Evolver) (func(context.Context, *Event) error, error) {
-	sm, ok := model.(snapshotEvolver)
-	if !ok || sm.snapshotBinding() == nil {
-		return model.Evolve, nil
-	}
-	if err := sm.snapshotBinding().checkStore(s); err != nil {
+	sm, _, err := s.boundModel(model)
+	if err != nil {
 		return nil, err
+	}
+	if sm == nil {
+		return model.Evolve, nil
 	}
 	return sm.evolveDecision, nil
 }
