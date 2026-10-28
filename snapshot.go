@@ -355,7 +355,7 @@ func (b *snapshotBinding) download(ctx context.Context, object string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	defer result.Close()
+	defer func() { _ = result.Close() }()
 	info, err := result.Info()
 	if err != nil {
 		return nil, err

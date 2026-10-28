@@ -1022,7 +1022,7 @@ func TestSnapshotLoad_RetriesWhenObjectRetiredDuringDownload(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		defer result.Close()
+		defer func() { _ = result.Close() }()
 		for range 2 {
 			appendOrderEvents(t, es, "order.1")
 			_, err := es.Evolve(ctx, m)
