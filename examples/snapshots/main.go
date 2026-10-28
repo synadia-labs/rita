@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -23,29 +22,18 @@ type Deposit struct{ Amount int }
 type Deposited struct{ Amount int }
 
 type Account struct {
-	Balance  int `json:"balance"`
-	Replayed int `json:"-"`
+	Balance int `json:"balance"`
 }
 
 func (a *Account) Decide(_ context.Context, cmd *rita.Command) ([]*rita.Event, error) {
-	c, ok := cmd.Data.(*Deposit)
-	if !ok {
-		return nil, nil
-	}
-	if c.Amount <= 0 {
-		return nil, errors.New("deposit must be positive")
-	}
+	c := cmd.Data.(*Deposit)
 	return []*rita.Event{{Entity: "account.1", Data: &Deposited{Amount: c.Amount}}}, nil
 }
 
 func (a *Account) Evolve(_ context.Context, e *rita.Event) error {
-	if d, ok := e.Data.(*Deposited); ok {
-		if d.Amount <= 0 {
-			return errors.New("invalid deposit event")
-		}
-		a.Balance += d.Amount
-		a.Replayed++
-	}
+	d := e.Data.(*Deposited)
+	a.Balance += d.Amount
+	fmt.Printf("  evolve seq=%d: +%d -> balance=%d\n", e.Sequence(), d.Amount, a.Balance)
 	return nil
 }
 
@@ -94,6 +82,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	fmt.Println("deposit 10")
 	if _, _, err := es.DecideAndEvolve(ctx, model, &rita.Command{Data: &Deposit{Amount: 10}}); err != nil {
 		return err
 	}
@@ -104,45 +94,34 @@ func run() error {
 	if err := model.SaveSnapshot(ctx); err != nil {
 		return err
 	}
-	if err := model.View(ctx, func(a *Account) error {
-		if a.Balance != 10 {
-			return fmt.Errorf("saved balance: got %d, want 10", a.Balance)
-		}
-		state, err := codec.JSON.Marshal(a)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("saved snapshot state: %s\n", state)
-		return nil
-	}); err != nil {
-		return err
-	}
+	printBalance(ctx, "save snapshot", model)
 
+	fmt.Println("deposit 5 (not in the snapshot)")
 	if _, _, err := es.DecideAndEvolve(ctx, model, &rita.Command{Data: &Deposit{Amount: 5}}); err != nil {
 		return err
 	}
+
+	fmt.Println("restart: load snapshot, replay the tail")
 	// Simulate an application restart: never reuse the original state pointer.
 	restored, err := rita.LoadModel(ctx, es, &Account{}, config)
 	if err != nil {
 		return err
 	}
-	if err := restored.View(ctx, func(a *Account) error {
-		if a.Balance != 15 || a.Replayed != 1 {
-			return fmt.Errorf("restored: got balance=%d replayed=%d, want balance=15 replayed=1", a.Balance, a.Replayed)
-		}
-		fmt.Printf("restored snapshot + %d tail event: balance=%d\n", a.Replayed, a.Balance)
-		return nil
-	}); err != nil {
+	printBalance(ctx, "loaded", restored)
+
+	fmt.Println("deposit 2 on the restored model")
+	events, _, err := es.DecideAndEvolve(ctx, restored, &rita.Command{Data: &Deposit{Amount: 2}})
+	if err != nil {
 		return err
 	}
-	if _, _, err := es.DecideAndEvolve(ctx, restored, &rita.Command{Data: &Deposit{Amount: 2}}); err != nil {
-		return err
-	}
-	return restored.View(ctx, func(a *Account) error {
-		if a.Balance != 17 {
-			return fmt.Errorf("next decision balance: got %d, want 17", a.Balance)
-		}
-		fmt.Printf("next decision accepted: balance=%d\n", a.Balance)
+	fmt.Printf("  expected last seq=%d, accepted\n", events[0].Expect.Sequence)
+	printBalance(ctx, "final", restored)
+	return nil
+}
+
+func printBalance(ctx context.Context, label string, m *rita.Model[*Account]) {
+	_ = m.View(ctx, func(a *Account) error {
+		fmt.Printf("%s: balance=%d\n", label, a.Balance)
 		return nil
 	})
 }
