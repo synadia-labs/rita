@@ -90,7 +90,25 @@ func (c *failingCounter) Decide(ctx context.Context, cmd *Command) ([]*Event, er
 
 var errEvolverRejected = errors.New("evolve failed")
 
-func TestModel_FailedEvolve_DecideExpectsLastAppliedSequence(t *testing.T) {
+func (m *Model[T]) evolveFailure() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.evolveFailureLocked()
+}
+
+func TestModel_FailedEvolve_DoesNotAdvanceSequence(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&failingCounter{failOn: 2})
+
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}))
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
+
+	is.Equal(m.lseq["counter.1"], uint64(1))
+}
+
+func TestModel_FailedEvolve_RefusesDecide(t *testing.T) {
 	is := testutil.NewIs(t)
 
 	ctx := context.Background()
@@ -100,8 +118,27 @@ func TestModel_FailedEvolve_DecideExpectsLastAppliedSequence(t *testing.T) {
 	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
 
 	events, err := m.Decide(ctx, &Command{Data: "test"})
-	is.NoErr(err)
-	is.Equal(events[0].Expect.Sequence, uint64(1))
+	is.Err(err, ErrEvolveFailed)
+	is.Err(err, errEvolverRejected)
+	is.Equal(len(events), 0)
+}
+
+func TestModel_FailedEvolveFollowedByLaterEvent_StillRefusesDecide(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	state := &failingCounter{failOn: 2}
+	m := NewModel(state)
+
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}))
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 3}))
+
+	is.Equal(state.Count, 2)
+	is.Equal(m.lseq["counter.1"], uint64(3))
+
+	_, err := m.Decide(ctx, &Command{Data: "test"})
+	is.Err(err, ErrEvolveFailed)
 }
 
 func TestModel_FailedEvolve_RecordsFailure(t *testing.T) {
@@ -179,14 +216,24 @@ func TestModel_InterleavedEntities_TrackSequencesIndependently(t *testing.T) {
 	is.Equal(state.Counts["order.a"], 3)
 	is.Equal(state.Counts["order.b"], 2)
 
-	expect := func(entity string) uint64 {
-		events, err := m.Decide(ctx, &Command{Data: entity})
-		is.NoErr(err)
-		return events[0].Expect.Sequence
-	}
-	is.Equal(expect("order.a"), uint64(7))
-	is.Equal(expect("order.b"), uint64(3))
-	is.Equal(expect("order.c"), uint64(0))
+	is.Equal(m.lseq["order.a"], uint64(7))
+	is.Equal(m.lseq["order.b"], uint64(3))
+	is.Equal(m.lseq["order.c"], uint64(0))
+}
+
+func TestModel_FailedEvolveOnOneEntity_RefusesDecideForEveryEntity(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&entityCounter{Counts: map[string]int{}, failOn: 2})
+
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "order.a", sequence: 1}))
+	is.Err(m.Evolve(ctx, &Event{Entity: "order.b", sequence: 2}), errEvolverRejected)
+
+	_, err := m.Decide(ctx, &Command{Data: "order.a"})
+	is.Err(err, ErrEvolveFailed)
+	_, err = m.Decide(ctx, &Command{Data: "order.c"})
+	is.Err(err, ErrEvolveFailed)
 }
 
 type mutateThenFailCounter struct {

@@ -160,7 +160,7 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 	}
 
 	if err := m.e.Evolve(ctx, event); err != nil {
-		m.recordEvolveErr(err)
+		m.recordEvolveErrLocked(err)
 		return err
 	}
 
@@ -175,6 +175,9 @@ func (m *Model[T]) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if err := m.evolveFailureLocked(); err != nil {
+		return nil, err
+	}
 	events, err := m.d.Decide(ctx, cmd)
 	if err != nil {
 		return nil, err
@@ -218,17 +221,21 @@ func NewModel[T any](t T) *Model[T] {
 	return m
 }
 
-func (m *Model[T]) recordEvolveErr(err error) {
+func (m *Model[T]) recordEvolveErrLocked(err error) {
 	if m.evolveErr == nil {
 		m.evolveErr = err
 	}
 }
 
-func (m *Model[T]) evolveFailure() error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (m *Model[T]) evolveFailureLocked() error {
 	if m.evolveErr == nil {
 		return nil
 	}
 	return fmt.Errorf("%w: %w", ErrEvolveFailed, m.evolveErr)
+}
+
+func (m *Model[T]) recordEvolveErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordEvolveErrLocked(err)
 }

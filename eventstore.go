@@ -547,6 +547,16 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	return events, seq, nil
 }
 
+type evolveFailureRecorder interface {
+	recordEvolveErr(error)
+}
+
+func recordEvolveFailure(model Evolver, err error) {
+	if r, ok := model.(evolveFailureRecorder); ok {
+		r.recordEvolveErr(err)
+	}
+}
+
 // orderedConsumer builds an ordered consumer from the given options.
 func (s *EventStore) orderedConsumer(ctx context.Context, o *options) (jetstream.Consumer, error) {
 	subjects, err := s.filtersToSubjects(o.filters)
@@ -641,6 +651,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 
 		event, err := s.unpackEvent(msg)
 		if err != nil {
+			recordEvolveFailure(model, err)
 			return lastSeq, err
 		}
 
@@ -813,6 +824,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 
 		ev, err := s.unpackEvent(m)
 		if err != nil {
+			recordEvolveFailure(model, err)
 			o.errHandler(fmt.Errorf("failed to unpack event: %w", err), nil, m)
 			return
 		}

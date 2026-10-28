@@ -137,11 +137,10 @@ step.
 > 123–129, and a rejected decision is 131–135.
 
 > **Partial-failure note.** If the evolve step fails *after* the append
-> succeeded (including a context cancellation between events), the events are
-> already durably stored but the in-memory model has only advanced up to the
-> last successfully-applied event. Recover by calling
-> [`Evolve` with `WithAfterSequence`](./reading-state.md#sequence-windows) to
-> replay the remainder onto the model.
+> succeeded, the events are already stored but the model is missing some of
+> them. The model then refuses every later `Decide` (see
+> [failed evolves](#failed-evolves)). Build a new model and replay it to
+> continue.
 
 ## Model
 
@@ -177,6 +176,34 @@ err := model.View(ctx, func(o *Order) error {
 `NewModel` detects which interfaces the wrapped type implements; calling a method
 the type doesn't support returns `ErrDeciderNotImplemented` or
 `ErrEvolverNotImplemented`.
+
+### Failed evolves
+
+An event can fail to apply. The usual cause is a deploy: a newer release
+appends an event type that an older release cannot decode, or that its evolver
+does not handle. A field whose type changed can also stop old events from
+decoding.
+
+Once that happens the model's state is missing an event, and its sequences can
+no longer be trusted. A later event for the same entity would move the
+sequence past the missing one, so a `Decide` could pass the
+[optimistic concurrency](#optimistic-concurrency) check against state that
+never saw it. To prevent that, a model that has failed to apply an event
+refuses every later `Decide`, for all entities, with `ErrEvolveFailed`. The
+error wraps the first failure:
+
+```go
+_, _, err := es.Decide(ctx, model, cmd)
+if errors.Is(err, rita.ErrEvolveFailed) {
+	// rebuild: a new model replayed by a release that knows the event
+}
+```
+
+This covers failures from `Evolve`, `DecideAndEvolve` and `Watch`, whether the
+event failed to decode or your evolver returned an error. A watcher keeps
+running after a failure, so `View` still sees later events, and your
+`WithErrHandler` callback is still called. The model never clears the failure.
+To decide again, build a new model and replay it.
 
 ## Optimistic concurrency
 
