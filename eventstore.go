@@ -519,8 +519,8 @@ func (s *EventStore) Decide(ctx context.Context, model Decider, cmd *Command) ([
 // in one operation. If any step fails, an error is returned. Note, that if the evolve
 // step fails — including via ctx cancellation between events — the events have
 // already been stored, and the in-memory model is advanced only up to the event
-// prior to the failure. Recovery is to call Evolve with WithAfterSequence to
-// replay the remaining events.
+// prior to the failure. A Model then refuses every later Decide with
+// ErrEvolveFailed; build a new model and replay it to continue.
 func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, cmd *Command) ([]*Event, uint64, error) {
 	// Guard before invoking the model so an unscoped handle cannot run the
 	// decider's side effects only to fail at Append (which re-checks).
@@ -545,6 +545,16 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	}
 
 	return events, seq, nil
+}
+
+type evolveFailureRecorder interface {
+	recordEvolveErr(error)
+}
+
+func recordEvolveFailure(model Evolver, err error) {
+	if r, ok := model.(evolveFailureRecorder); ok {
+		r.recordEvolveErr(err)
+	}
 }
 
 // orderedConsumer builds an ordered consumer from the given options.
@@ -641,6 +651,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 
 		event, err := s.unpackEvent(msg)
 		if err != nil {
+			recordEvolveFailure(model, err)
 			return lastSeq, err
 		}
 
@@ -813,6 +824,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 
 		ev, err := s.unpackEvent(m)
 		if err != nil {
+			recordEvolveFailure(model, err)
 			o.errHandler(fmt.Errorf("failed to unpack event: %w", err), nil, m)
 			return
 		}

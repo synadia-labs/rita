@@ -3,6 +3,7 @@ package rita
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 var (
 	ErrEvolverNotImplemented = errors.New("evolver not implemented")
 	ErrDeciderNotImplemented = errors.New("decider not implemented")
+	ErrEvolveFailed          = errors.New("model has a failed evolve")
 )
 
 type Expect struct {
@@ -139,6 +141,8 @@ type Model[T any] struct {
 	// "<entity-type>.<entity-id>" string.
 	lseq map[string]uint64
 
+	evolveErr error
+
 	mu sync.RWMutex
 }
 
@@ -155,9 +159,13 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 		return nil
 	}
 
-	m.lseq[event.Entity] = event.sequence
+	if err := m.e.Evolve(ctx, event); err != nil {
+		m.recordEvolveErrLocked(err)
+		return err
+	}
 
-	return m.e.Evolve(ctx, event)
+	m.lseq[event.Entity] = event.sequence
+	return nil
 }
 
 func (m *Model[T]) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
@@ -167,6 +175,9 @@ func (m *Model[T]) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if err := m.evolveFailureLocked(); err != nil {
+		return nil, err
+	}
 	events, err := m.d.Decide(ctx, cmd)
 	if err != nil {
 		return nil, err
@@ -196,6 +207,12 @@ func (m *Model[T]) View(ctx context.Context, fn func(T) error) error {
 	return fn(m.t)
 }
 
+func (m *Model[T]) EvolveErr() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.evolveFailureLocked()
+}
+
 func NewModel[T any](t T) *Model[T] {
 	m := &Model[T]{}
 	m.t = t
@@ -208,4 +225,23 @@ func NewModel[T any](t T) *Model[T] {
 	m.lseq = make(map[string]uint64)
 
 	return m
+}
+
+func (m *Model[T]) recordEvolveErrLocked(err error) {
+	if m.evolveErr == nil {
+		m.evolveErr = err
+	}
+}
+
+func (m *Model[T]) evolveFailureLocked() error {
+	if m.evolveErr == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrEvolveFailed, m.evolveErr)
+}
+
+func (m *Model[T]) recordEvolveErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordEvolveErrLocked(err)
 }

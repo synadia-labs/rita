@@ -1008,3 +1008,163 @@ func TestUpdateMergesCustomMetadata(t *testing.T) {
 	is.Equal(md["tier"], "gold")      // omitted: preserved
 	is.Equal(md["region"], "us-east") // new: added
 }
+
+type flakyCounter struct {
+	Count     int
+	failOnce  uint64
+	attempted map[uint64]int
+}
+
+func (c *flakyCounter) Evolve(_ context.Context, event *Event) error {
+	c.attempted[event.Sequence()]++
+	if event.Sequence() == c.failOnce && c.attempted[event.Sequence()] == 1 {
+		return errEvolverRejected
+	}
+	c.Count++
+	return nil
+}
+
+func TestEvolveReplayReappliesFailedEvent(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := es.Append(ctx, []*Event{
+		{Entity: "order.1", Data: &OrderPlaced{}},
+		{Entity: "order.1", Data: &OrderShipped{}},
+	})
+	is.NoErr(err)
+
+	state := &flakyCounter{failOnce: 2, attempted: map[uint64]int{}}
+	model := NewModel(state)
+
+	_, err = es.Evolve(ctx, model)
+	is.Err(err, errEvolverRejected)
+
+	seq, err := es.Evolve(ctx, model, WithAfterSequence(0))
+	is.NoErr(err)
+	is.Equal(seq, uint64(2))
+	is.Equal(state.attempted[2], 2)
+	is.Equal(state.Count, 2)
+}
+
+func typesWithout(name string) map[string]*types.Type {
+	reg := map[string]*types.Type{}
+	for n, typ := range registry {
+		if n != name {
+			reg[n] = typ
+		}
+	}
+	return reg
+}
+
+func storeWithTypes(t *testing.T, nc *nats.Conn, reg map[string]*types.Type, create bool) *EventStore {
+	t.Helper()
+	tr, err := types.NewRegistry(reg)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	m, err := New(nc, WithRegistry(tr))
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	var es *EventStore
+	if create {
+		es, err = m.CreateEventStore(context.Background(), EventStoreConfig{Name: "orders"})
+	} else {
+		es, err = m.GetEventStore(context.Background(), "orders")
+	}
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	return es
+}
+
+func newCanceledOrderStores(t *testing.T) (full, stale *EventStore) {
+	t.Helper()
+	srv := testutil.NewNatsServer(t)
+	t.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+
+	full = storeWithTypes(t, nc, registry, true)
+	stale = storeWithTypes(t, nc, typesWithout("order-canceled"), false)
+	_, err = full.Append(context.Background(), []*Event{
+		{Entity: "order.1", Data: &OrderPlaced{}},
+		{Entity: "order.1", Data: &OrderCanceled{}},
+		{Entity: "order.1", Data: &OrderShipped{}},
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	return full, stale
+}
+
+func watchModel(t *testing.T, es *EventStore, model Evolver) {
+	t.Helper()
+	w, err := es.Watch(context.Background(), model)
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	t.Cleanup(w.Stop)
+}
+
+func TestFailedEvolve_WatcherCannotDecodeEvent_RefusesDecide(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	full, stale := newCanceledOrderStores(t)
+
+	model := NewModel(&OrderStats{})
+	watchModel(t, stale, model)
+	is.Equal(model.lseq["order.1"], uint64(3))
+	is.Err(model.EvolveErr(), types.ErrTypeNotRegistered)
+
+	_, _, err := stale.Decide(ctx, model, &Command{Data: &ShipOrder{}})
+	is.Err(err, ErrEvolveFailed)
+	is.Err(err, types.ErrTypeNotRegistered)
+
+	state := &OrderStats{}
+	rebuilt := NewModel(state)
+	watchModel(t, full, rebuilt)
+	is.NoErr(rebuilt.EvolveErr())
+	is.Equal(state.Canceled, 1)
+}
+
+func TestFailedEvolve_ReplayCannotDecodeEvent_RefusesDecide(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	_, stale := newCanceledOrderStores(t)
+
+	model := NewModel(&OrderStats{})
+	_, err := stale.Evolve(ctx, model)
+	is.Err(err, types.ErrTypeNotRegistered)
+
+	_, _, err = stale.Decide(ctx, model, &Command{Data: &ShipOrder{}})
+	is.Err(err, ErrEvolveFailed)
+	is.Err(err, types.ErrTypeNotRegistered)
+}
+
+func TestFailedEvolve_TemporaryEvolverError_RebuildRecovers(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	es := newTestStore(t)
+	_, err := es.Append(ctx, []*Event{
+		{Entity: "counter.1", Data: &OrderPlaced{}},
+		{Entity: "counter.1", Data: &OrderPlaced{}},
+	})
+	is.NoErr(err)
+
+	flaky := NewModel(&failingCounter{failOn: 2})
+	_, err = es.Evolve(ctx, flaky)
+	is.Err(err, errEvolverRejected)
+	is.Err(flaky.EvolveErr(), errEvolverRejected)
+
+	rebuilt := NewModel(&failingCounter{})
+	_, err = es.Evolve(ctx, rebuilt)
+	is.NoErr(err)
+	_, _, err = es.Decide(ctx, rebuilt, &Command{Data: &OrderPlaced{}})
+	is.NoErr(err)
+}
