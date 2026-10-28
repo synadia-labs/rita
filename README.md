@@ -82,11 +82,40 @@ Each pattern has a complete, runnable program under [`examples/`](./examples):
 | --- | --- |
 | [`quickstart`](./examples/quickstart) | Append events and rebuild state. |
 | [`deciders`](./examples/deciders) | Command → events → state through a model. |
+| [`snapshots`](./examples/snapshots) | Explicit snapshot, fresh-state restore, and tail replay. |
 | [`optimistic-concurrency`](./examples/optimistic-concurrency) | Expected-sequence guarding and retry. |
 | [`projection`](./examples/projection) | A live read model via `Watch`. |
 | [`tenancy`](./examples/tenancy) | One store, many isolated tenants. |
 | [`reactor`](./examples/reactor) | A minimal durable side-effect consumer. |
 | [`reactor-lifecycle`](./examples/reactor-lifecycle) | The full reactor management API. |
+
+## Snapshots
+
+A snapshot saves a model's state to a NATS Object Store, so the next load
+only replays the events added since the save, not the whole history.
+
+```go
+model, err := rita.LoadModel(ctx, es, &Order{}, rita.SnapshotConfig{
+	Name:    "order-1001",
+	Version: "v1",
+	Filters: []string{"order.1001"},
+	Codec:   codec.JSON,
+})
+if err != nil {
+	return err
+}
+
+if err := model.SaveSnapshot(ctx); err != nil {
+	return err
+}
+```
+
+`LoadModel` restores the latest snapshot and replays any newer events.
+`SaveSnapshot` stores the current state. Always pass a new, empty state
+value to `LoadModel`.
+
+See [Reading state](./docs/reading-state.md#snapshots) for codecs, storage
+and permissions, live models, and when a snapshot is rejected.
 
 ## Documentation
 
@@ -96,7 +125,6 @@ The [`docs/`](./docs) directory breaks down each pattern in depth:
 - [Event stores](./docs/event-stores.md) — the manager and event store lifecycle.
 - [Events & types](./docs/events-and-types.md) — events, entities, the type registry, and codecs.
 - [Deciders & evolvers](./docs/deciders-and-evolvers.md) — the core write-side patterns and optimistic concurrency.
-- [Reading state](./docs/reading-state.md) — `Evolve`, `Watch`, filters, and sequence windows.
+- [Reading state](./docs/reading-state.md) — `Evolve`, `Watch`, snapshots, filters, and sequence windows.
 - [Reactors](./docs/reactors.md) — durable consumers for side effects.
 - [Multi-tenancy](./docs/tenancy.md) — scoping a single store to many tenants.
-
