@@ -862,18 +862,9 @@ func savedOrdersSnapshot(t *testing.T) (*EventStore, *Model[*entityCounter], *sn
 	return es, m, storedManifest(t, m)
 }
 
-func currentInfo[T any](t testing.TB, m *Model[T]) *jetstream.StreamInfo {
-	t.Helper()
-	info, err := m.snap.streamInfo(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return info
-}
-
 func storedManifest[T any](t testing.TB, m *Model[T]) *snapshotManifest {
 	t.Helper()
-	manifest, _, err := m.snap.read(context.Background(), currentInfo(t, m))
+	manifest, _, _, err := m.snap.read(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,7 +981,7 @@ func TestSnapshotLoad_RetriesWhenManifestReplacedDuringFetch(t *testing.T) {
 	ctx := context.Background()
 	es, m, _ := savedOrdersSnapshot(t)
 	attempts := 0
-	env, _, err := m.snap.load(ctx, currentInfo(t, m), func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+	env, _, err := m.snap.load(ctx, func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
 		attempts++
 		if attempts == 1 {
 			advanceAndSave(t, es, m)
@@ -1013,7 +1004,7 @@ func TestSnapshotLoad_RetriesWhenObjectRetiredDuringDownload(t *testing.T) {
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
 	first := true
-	env, _, err := m.snap.load(ctx, currentInfo(t, m), func(fetchCtx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+	env, _, err := m.snap.load(ctx, func(fetchCtx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
 		if !first {
 			return m.snap.fetch(fetchCtx, info, manifest)
 		}
@@ -1049,7 +1040,7 @@ func TestSnapshotLoad_InvalidObjectWithUnchangedManifestFailsAtOnce(t *testing.T
 	_, err := m.snap.objects.PutBytes(ctx, manifest.Current, []byte("not json"))
 	is.NoErr(err)
 	attempts := 0
-	_, _, err = m.snap.load(ctx, currentInfo(t, m), func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+	_, _, err = m.snap.load(ctx, func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
 		attempts++
 		return m.snap.fetch(ctx, info, manifest)
 	})
@@ -1065,7 +1056,7 @@ func TestSnapshotLoad_MissingObjectWithUnchangedManifestRetriesForReplicaLag(t *
 	is.NoErr(err)
 	is.NoErr(m.snap.objects.Delete(ctx, manifest.Current))
 	attempts := 0
-	env, _, err := m.snap.load(ctx, currentInfo(t, m), func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+	env, _, err := m.snap.load(ctx, func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
 		attempts++
 		if attempts == snapshotFetchAttempts {
 			_, err := m.snap.objects.PutBytes(ctx, manifest.Current, data)
@@ -1084,7 +1075,7 @@ func TestSnapshotLoad_StopsRetryingAfterThreeReplacedManifests(t *testing.T) {
 	es, m, _ := savedOrdersSnapshot(t)
 	errUnreadable := errors.New("unreadable")
 	attempts := 0
-	_, _, err := m.snap.load(ctx, currentInfo(t, m), func(context.Context, *jetstream.StreamInfo, *snapshotManifest) (*snapshotEnvelope, error) {
+	_, _, err := m.snap.load(ctx, func(context.Context, *jetstream.StreamInfo, *snapshotManifest) (*snapshotEnvelope, error) {
 		attempts++
 		advanceAndSave(t, es, m)
 		return nil, errUnreadable
@@ -1120,7 +1111,7 @@ func TestSnapshotLoad_AttemptsShareCallerDeadline(t *testing.T) {
 	defer cancel()
 	es, m, _ := savedOrdersSnapshot(t)
 	var deadlines []time.Time
-	_, _, err := m.snap.load(ctx, currentInfo(t, m), func(fetchCtx context.Context, _ *jetstream.StreamInfo, _ *snapshotManifest) (*snapshotEnvelope, error) {
+	_, _, err := m.snap.load(ctx, func(fetchCtx context.Context, _ *jetstream.StreamInfo, _ *snapshotManifest) (*snapshotEnvelope, error) {
 		deadline, ok := fetchCtx.Deadline()
 		is.True(ok)
 		deadlines = append(deadlines, deadline)
@@ -1443,6 +1434,33 @@ func TestSnapshotWatch_RepeatedStopDoesNotStopReplacement(t *testing.T) {
 	defer cancel()
 	_, err = es.Evolve(bounded, m)
 	is.Err(err, ErrModelBusy)
+}
+
+func TestSnapshotLoad_AcceptsSnapshotSavedAfterBindingOpened(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
+	appendOrderEvents(t, es, "order.1")
+	writer, err := LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+	is.NoErr(writer.SaveSnapshot(ctx))
+	reader, err := LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+
+	_, _, err = es.DecideAndEvolve(ctx, writer, &Command{Data: "order.1"})
+	is.NoErr(err)
+	_, err = es.Evolve(ctx, writer)
+	is.NoErr(err)
+	is.NoErr(writer.SaveSnapshot(ctx))
+
+	env, info, err := reader.snap.load(ctx, reader.snap.fetch)
+	is.NoErr(err)
+	is.Equal(env.Cursor, storedManifest(t, writer).Cursor)
+	is.True(info.State.LastSeq >= env.Cursor)
+	for _, seq := range env.Sequences {
+		is.True(info.State.LastSeq >= seq)
+	}
 }
 
 func TestSnapshotLoad_WhileCheckpointAdvances(t *testing.T) {

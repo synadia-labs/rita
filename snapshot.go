@@ -69,11 +69,10 @@ func loadModel[T any](ctx context.Context, store *EventStore, initial T, config 
 		encode:  encode,
 	}
 
-	info, err := m.snap.open(ctx)
-	if err != nil {
+	if err := m.snap.open(ctx); err != nil {
 		return nil, err
 	}
-	env, info, err := m.snap.load(ctx, info, m.snap.fetch)
+	env, info, err := m.snap.load(ctx, m.snap.fetch)
 	if err != nil {
 		return nil, err
 	}
@@ -190,17 +189,17 @@ func snapshotBuckets(storeName string) (manifests, objects string, err error) {
 	return manifests, "ES_SNAP_DATA_" + storeName, nil
 }
 
-func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, error) {
+func (b *snapshotBinding) open(ctx context.Context) error {
 	if err := b.store.requireTenant(); err != nil {
-		return nil, err
+		return err
 	}
 	bucket, dataBucket, err := snapshotBuckets(b.store.name)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	info, err := b.streamInfo(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	b.created = info.Created
 	b.kv, err = b.store.js.KeyValue(ctx, bucket)
@@ -210,7 +209,7 @@ func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, erro
 		})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("open snapshot bucket: %w", err)
+		return fmt.Errorf("open snapshot bucket: %w", err)
 	}
 	b.objects, err = b.store.js.ObjectStore(ctx, dataBucket)
 	if errors.Is(err, jetstream.ErrBucketNotFound) {
@@ -219,14 +218,14 @@ func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, erro
 		})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("open snapshot data bucket: %w", err)
+		return fmt.Errorf("open snapshot data bucket: %w", err)
 	}
 	identity, err := json.Marshal(b.identity())
 	if err != nil {
-		return nil, err
+		return err
 	}
 	b.key = fmt.Sprintf("%x", sha256.Sum256(identity))
-	return info, nil
+	return nil
 }
 
 func (b *snapshotBinding) streamInfo(ctx context.Context) (*jetstream.StreamInfo, error) {
@@ -241,28 +240,32 @@ func covers(previous *snapshotManifest, cursor uint64) bool {
 	return previous != nil && previous.Cursor >= cursor
 }
 
-func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) (*snapshotManifest, uint64, error) {
+func (b *snapshotBinding) read(ctx context.Context) (*snapshotManifest, *jetstream.StreamInfo, uint64, error) {
 	entry, err := b.kv.Get(ctx, b.key)
-	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return nil, 0, nil
+	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
+		return nil, nil, 0, fmt.Errorf("read snapshot: %w", err)
+	}
+	info, infoErr := b.streamInfo(ctx)
+	if infoErr != nil {
+		return nil, nil, 0, infoErr
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("read snapshot: %w", err)
+		return nil, info, 0, nil
 	}
 	var manifest snapshotManifest
 	if err := json.Unmarshal(entry.Value(), &manifest); err != nil {
-		return nil, 0, fmt.Errorf("%w: cannot decode stored value: %w", ErrSnapshotInvalid, err)
+		return nil, nil, 0, fmt.Errorf("%w: cannot decode stored value: %w", ErrSnapshotInvalid, err)
 	}
 	switch {
 	case !reflect.DeepEqual(manifest.Identity, b.identity()):
-		return nil, 0, fmt.Errorf("%w: stored value is for a different snapshot config", ErrSnapshotInvalid)
+		return nil, nil, 0, fmt.Errorf("%w: stored value is for a different snapshot config", ErrSnapshotInvalid)
 	case manifest.Current == "":
-		return nil, 0, fmt.Errorf("%w: stored value names no snapshot object", ErrSnapshotInvalid)
+		return nil, nil, 0, fmt.Errorf("%w: stored value names no snapshot object", ErrSnapshotInvalid)
 	}
 	if staleAgainst(info, manifest.Created, manifest.Cursor) {
-		return nil, 0, ErrSnapshotStale
+		return nil, nil, 0, ErrSnapshotStale
 	}
-	return &manifest, entry.Revision(), nil
+	return &manifest, info, entry.Revision(), nil
 }
 
 type snapshotFetch func(context.Context, *jetstream.StreamInfo, *snapshotManifest) (*snapshotEnvelope, error)
@@ -282,16 +285,10 @@ func snapshotFetchContext(ctx context.Context) (context.Context, context.CancelF
 	return context.WithTimeout(ctx, snapshotFetchTimeout)
 }
 
-func (b *snapshotBinding) load(ctx context.Context, info *jetstream.StreamInfo, fetch snapshotFetch) (*snapshotEnvelope, *jetstream.StreamInfo, error) {
+func (b *snapshotBinding) load(ctx context.Context, fetch snapshotFetch) (*snapshotEnvelope, *jetstream.StreamInfo, error) {
 	var fetchErr error
 	for attempt := range snapshotFetchAttempts {
-		if attempt > 0 {
-			var err error
-			if info, err = b.streamInfo(ctx); err != nil {
-				return nil, nil, err
-			}
-		}
-		manifest, revision, err := b.read(ctx, info)
+		manifest, info, revision, err := b.read(ctx)
 		if err != nil || manifest == nil {
 			return nil, info, err
 		}
@@ -387,7 +384,7 @@ func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
 	if staleAgainst(info, b.created, cursor) {
 		return ErrSnapshotStale
 	}
-	previous, revision, err := b.read(ctx, info)
+	previous, _, revision, err := b.read(ctx)
 	if err != nil {
 		return err
 	}
@@ -493,7 +490,7 @@ func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, re
 		return fmt.Errorf("save snapshot: %w", err)
 	}
 	b.retire(ctx, next.Current)
-	current, _, readErr := b.read(ctx, info)
+	current, _, _, readErr := b.read(ctx)
 	if readErr != nil {
 		return readErr
 	}
