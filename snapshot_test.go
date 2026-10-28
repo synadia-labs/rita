@@ -771,15 +771,40 @@ func TestSnapshotPublish_UnconfirmedWriteThatCommittedKeepsObject(t *testing.T) 
 	is.NoErr(err)
 }
 
-func TestSnapshotPublish_UnconfirmedWriteThatFailedRetiresObject(t *testing.T) {
+func TestSnapshotPublish_UnconfirmedWriteKeepsObjectUntilItCannotLand(t *testing.T) {
 	is := testutil.NewIs(t)
 	ctx := context.Background()
 	m, next, previous, revision := uploadNextSnapshot(t)
-	m.snap.kv = unconfirmedKV{KeyValue: m.snap.kv}
+	kv := m.snap.kv
+	m.snap.kv = unconfirmedKV{KeyValue: kv}
 
 	is.Err(m.snap.publish(ctx, next, revision, previous), nats.ErrTimeout)
 	is.Equal(storedManifest(t, m).Current, previous.Current)
 	_, err := m.snap.objects.GetInfo(ctx, next.Current)
+	is.NoErr(err)
+
+	next.Previous = previous.Current
+	late, err := json.Marshal(next)
+	is.NoErr(err)
+	_, err = kv.Update(ctx, m.snap.key, late, revision)
+	is.NoErr(err)
+
+	_, err = LoadModel(ctx, m.snap.store, newCounter(), ordersConfig())
+	is.NoErr(err)
+}
+
+func TestSnapshotPublish_UnconfirmedWriteOvertakenByAnotherSaveRetiresObject(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	m, next, previous, revision := uploadNextSnapshot(t)
+	entry, err := m.snap.kv.Get(ctx, m.snap.key)
+	is.NoErr(err)
+	_, err = m.snap.kv.Put(ctx, m.snap.key, entry.Value())
+	is.NoErr(err)
+	m.snap.kv = unconfirmedKV{KeyValue: m.snap.kv}
+
+	is.Err(m.snap.publish(ctx, next, revision, previous), nats.ErrTimeout)
+	_, err = m.snap.objects.GetInfo(ctx, next.Current)
 	is.Err(err, jetstream.ErrObjectNotFound)
 }
 

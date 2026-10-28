@@ -145,10 +145,15 @@ A save uploads a new snapshot, then points the KV value at it. Rita keeps the
 current snapshot and the previous one, so a load that started before a save
 can still finish. If the KV write fails, Rita deletes the new snapshot. If the
 write times out, Rita reads the KV value back. If the write succeeded, Rita
-keeps the snapshot. An unused snapshot can stay in the Object Store if the
-process stops between the two steps, or if the read back also fails. Rita
-does not remove these snapshots. Their names start with the KV key of their
-snapshot config.
+keeps the snapshot. If another save changed the KV value, Rita deletes the
+new snapshot. In all other cases Rita keeps it, because the write can still
+arrive. An unused snapshot can also stay if the process stops between the two
+steps. Rita does not remove these snapshots. Their names start with the KV key
+of their snapshot config.
+
+The KV key comes from `Name`, `Version`, `Filters` and `Codec`. If you change
+one of them, the model uses a new key. Rita does not remove the old key or its
+snapshots. Delete them when no service loads them.
 
 If an upload fails, the save fails and the previous snapshot stays.
 

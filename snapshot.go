@@ -469,22 +469,21 @@ func (b *snapshotBinding) retirePrevious(ctx context.Context, previous *snapshot
 	}
 }
 
-func (b *snapshotBinding) confirmPublish(ctx context.Context, next snapshotManifest, previous *snapshotManifest, writeErr error) error {
+func (b *snapshotBinding) confirmPublish(ctx context.Context, next snapshotManifest, revision uint64, previous *snapshotManifest, writeErr error) error {
 	checkCtx, cancel := snapshotCleanupContext(ctx)
 	defer cancel()
 	entry, err := b.kv.Get(checkCtx, b.key)
-	switch {
-	case errors.Is(err, jetstream.ErrKeyNotFound):
-	case err != nil:
+	if err != nil {
 		return writeErr
-	default:
-		var stored snapshotManifest
-		if json.Unmarshal(entry.Value(), &stored) == nil && stored.Current == next.Current {
-			b.retirePrevious(ctx, previous)
-			return nil
-		}
 	}
-	b.retire(ctx, next.Current)
+	var stored snapshotManifest
+	if json.Unmarshal(entry.Value(), &stored) == nil && stored.Current == next.Current {
+		b.retirePrevious(ctx, previous)
+		return nil
+	}
+	if entry.Revision() != revision {
+		b.retire(ctx, next.Current)
+	}
 	return writeErr
 }
 
@@ -520,7 +519,7 @@ func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, re
 		b.retirePrevious(ctx, previous)
 		return nil
 	case !publishRejected(err):
-		return b.confirmPublish(ctx, next, previous, fmt.Errorf("save snapshot: %w", err))
+		return b.confirmPublish(ctx, next, revision, previous, fmt.Errorf("save snapshot: %w", err))
 	}
 	b.retire(ctx, next.Current)
 	current, _, _, readErr := b.read(ctx)
