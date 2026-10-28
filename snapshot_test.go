@@ -638,6 +638,122 @@ func TestSnapshotSave_StreamRecreatedDuringUploadIsStale(t *testing.T) {
 	is.Equal(after.Revision(), before.Revision())
 }
 
+type unconfirmedKV struct {
+	jetstream.KeyValue
+	commit bool
+}
+
+func (kv unconfirmedKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if kv.commit {
+		if _, err := kv.KeyValue.Update(ctx, key, value, revision); err != nil {
+			return 0, err
+		}
+	}
+	return 0, nats.ErrTimeout
+}
+
+func uploadNextSnapshot(t *testing.T) (*Model[*entityCounter], snapshotManifest, *snapshotManifest, uint64) {
+	t.Helper()
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	appendOrderEvents(t, es, "order.1")
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig())
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	entry, err := m.snap.kv.Get(ctx, m.snap.key)
+	is.NoErr(err)
+	previous := storedManifest(t, m)
+	appendOrderEvents(t, es, "order.1")
+	_, err = es.Evolve(ctx, m)
+	is.NoErr(err)
+	candidate, err := m.captureSnapshot()
+	is.NoErr(err)
+	next, err := m.snap.upload(ctx, candidate)
+	is.NoErr(err)
+	return m, next, previous, entry.Revision()
+}
+
+func TestSnapshotPublish_UnconfirmedWriteThatCommittedKeepsObject(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	m, next, previous, revision := uploadNextSnapshot(t)
+	m.snap.kv = unconfirmedKV{KeyValue: m.snap.kv, commit: true}
+
+	is.NoErr(m.snap.publish(ctx, next, revision, previous))
+	is.Equal(storedManifest(t, m).Current, next.Current)
+	_, err := m.snap.objects.GetInfo(ctx, next.Current)
+	is.NoErr(err)
+}
+
+func TestSnapshotPublish_UnconfirmedWriteThatFailedRetiresObject(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	m, next, previous, revision := uploadNextSnapshot(t)
+	m.snap.kv = unconfirmedKV{KeyValue: m.snap.kv}
+
+	is.Err(m.snap.publish(ctx, next, revision, previous), nats.ErrTimeout)
+	is.Equal(storedManifest(t, m).Current, previous.Current)
+	_, err := m.snap.objects.GetInfo(ctx, next.Current)
+	is.Err(err, jetstream.ErrObjectNotFound)
+}
+
+func TestSnapshotPublish_CancelledContextStillRetiresObject(t *testing.T) {
+	is := testutil.NewIs(t)
+	m, next, previous, revision := uploadNextSnapshot(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	is.Err(m.snap.publish(ctx, next, revision, previous), context.Canceled)
+	is.Equal(storedManifest(t, m).Current, previous.Current)
+	_, err := m.snap.objects.GetInfo(context.Background(), next.Current)
+	is.Err(err, jetstream.ErrObjectNotFound)
+}
+
+type endlessObject struct{ size uint64 }
+
+func (o endlessObject) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+func (endlessObject) Close() error { return nil }
+func (endlessObject) Error() error { return nil }
+func (o endlessObject) Info() (*jetstream.ObjectInfo, error) {
+	return &jetstream.ObjectInfo{ObjectMeta: jetstream.ObjectMeta{Name: "endless"}, Size: o.size}, nil
+}
+
+type endlessObjects struct {
+	jetstream.ObjectStore
+	size uint64
+}
+
+func (s endlessObjects) Get(context.Context, string, ...jetstream.GetObjectOpt) (jetstream.ObjectResult, error) {
+	return endlessObject{size: s.size}, nil
+}
+
+func TestSnapshotDownload_StopsReadingPastDeclaredSize(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	m, err := LoadModel(context.Background(), es, newCounter(), ordersConfig())
+	is.NoErr(err)
+	m.snap.objects = endlessObjects{ObjectStore: m.snap.objects, size: 16}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.snap.download(context.Background(), "endless")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		is.Err(err, ErrSnapshotInvalid)
+	case <-time.After(5 * time.Second):
+		t.Fatal("download kept reading past the object's declared size")
+	}
+}
+
 func TestSnapshotPublishRejected_OnlyDefiniteRejectionsAllowCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name string

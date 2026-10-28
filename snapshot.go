@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -275,6 +276,8 @@ const (
 	snapshotFetchTimeout  = 30 * time.Second
 	snapshotFetchBackoff  = 50 * time.Millisecond
 
+	snapshotCleanupTimeout = 5 * time.Second
+
 	snapshotDownloadPrealloc uint64 = 8 << 20
 )
 
@@ -359,7 +362,7 @@ func (b *snapshotBinding) download(ctx context.Context, object string) ([]byte, 
 	}
 	var buf bytes.Buffer
 	buf.Grow(int(min(info.Size, snapshotDownloadPrealloc)))
-	if _, err := buf.ReadFrom(result); err != nil {
+	if _, err := buf.ReadFrom(io.LimitReader(result, int64(min(info.Size, math.MaxInt64-1))+1)); err != nil {
 		return nil, err
 	}
 	if uint64(buf.Len()) != info.Size {
@@ -430,10 +433,16 @@ func (b *snapshotBinding) upload(ctx context.Context, candidate snapshotEnvelope
 	}, nil
 }
 
+func snapshotCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), snapshotCleanupTimeout)
+}
+
 func (b *snapshotBinding) retire(ctx context.Context, object string) {
 	if object == "" {
 		return
 	}
+	ctx, cancel := snapshotCleanupContext(ctx)
+	defer cancel()
 	if err := b.objects.Delete(ctx, object); err != nil && !errors.Is(err, jetstream.ErrObjectNotFound) {
 		b.store.logger.Warn("snapshot object cleanup failed", "object", object, "error", err)
 	}
@@ -455,6 +464,31 @@ func (m *Model[T]) captureSnapshot() (snapshotEnvelope, error) {
 	}, nil
 }
 
+func (b *snapshotBinding) retirePrevious(ctx context.Context, previous *snapshotManifest) {
+	if previous != nil {
+		b.retire(ctx, previous.Previous)
+	}
+}
+
+func (b *snapshotBinding) confirmPublish(ctx context.Context, next snapshotManifest, previous *snapshotManifest, writeErr error) error {
+	checkCtx, cancel := snapshotCleanupContext(ctx)
+	defer cancel()
+	entry, err := b.kv.Get(checkCtx, b.key)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+	case err != nil:
+		return writeErr
+	default:
+		var stored snapshotManifest
+		if json.Unmarshal(entry.Value(), &stored) == nil && stored.Current == next.Current {
+			b.retirePrevious(ctx, previous)
+			return nil
+		}
+	}
+	b.retire(ctx, next.Current)
+	return writeErr
+}
+
 func publishRejected(err error) bool {
 	return errors.Is(err, jetstream.ErrKeyExists) || errors.Is(err, jetstream.ErrKeyRevisionMismatch)
 }
@@ -462,6 +496,7 @@ func publishRejected(err error) bool {
 func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, revision uint64, previous *snapshotManifest) error {
 	info, err := b.streamInfo(ctx)
 	if err != nil {
+		b.retire(ctx, next.Current)
 		return err
 	}
 	if staleAgainst(info, next.Created, next.Cursor) {
@@ -473,6 +508,7 @@ func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, re
 	}
 	data, err := json.Marshal(next)
 	if err != nil {
+		b.retire(ctx, next.Current)
 		return fmt.Errorf("encode snapshot manifest: %w", err)
 	}
 	if revision == 0 {
@@ -482,12 +518,10 @@ func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, re
 	}
 	switch {
 	case err == nil:
-		if previous != nil {
-			b.retire(ctx, previous.Previous)
-		}
+		b.retirePrevious(ctx, previous)
 		return nil
 	case !publishRejected(err):
-		return fmt.Errorf("save snapshot: %w", err)
+		return b.confirmPublish(ctx, next, previous, fmt.Errorf("save snapshot: %w", err))
 	}
 	b.retire(ctx, next.Current)
 	current, _, _, readErr := b.read(ctx)

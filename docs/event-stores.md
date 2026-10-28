@@ -139,9 +139,12 @@ buckets, create both before you start.
 
 A save uploads a new snapshot, then points the KV value at it. Rita keeps the
 current snapshot and the previous one, so a load that started before a save
-can still finish. If a process stops between those two steps, or the KV write
-times out, an unused snapshot can stay in the Object Store. Rita does not
-remove these yet; their names start with the KV key they were saved for.
+can still finish. If the KV write fails, Rita deletes the new snapshot. If the
+write times out, Rita reads the KV value back first and keeps the snapshot
+when the write landed. An unused snapshot can still stay in the Object Store
+if the process stops between the two steps, or if that read back also fails.
+Rita does not remove these yet; their names start with the KV key they were
+saved for.
 
 If an upload fails, the save fails and the previous snapshot stays.
 
