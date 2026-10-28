@@ -3,9 +3,15 @@ package rita
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,6 +94,15 @@ func TestSnapshotLoadModel_RejectsStoreNameUnfitForBucket(t *testing.T) {
 
 	_, err = LoadModel(ctx, es, newCounter(), ordersConfig())
 	is.Err(err, ErrSnapshotConfigInvalid)
+}
+
+func TestSnapshotBuckets_ManifestBucketNeverNamesAnotherStoresDataBucket(t *testing.T) {
+	is := testutil.NewIs(t)
+	manifests, _, err := snapshotBuckets("DATA_orders")
+	is.NoErr(err)
+	_, objects, err := snapshotBuckets("orders")
+	is.NoErr(err)
+	is.True(manifests != objects)
 }
 
 func TestSnapshotLoadModel_WithoutSnapshotReplaysConfiguredScope(t *testing.T) {
@@ -183,9 +198,7 @@ func counts(t *testing.T, m *Model[*entityCounter]) map[string]int {
 	t.Helper()
 	out := map[string]int{}
 	err := m.View(context.Background(), func(c *entityCounter) error {
-		for k, v := range c.Counts {
-			out[k] = v
-		}
+		maps.Copy(out, c.Counts)
 		return nil
 	})
 	if err != nil {
@@ -579,32 +592,240 @@ func TestSnapshotSave_ConflictWithOlderWriterIsReported(t *testing.T) {
 
 	candidate, err := third.captureSnapshot()
 	is.NoErr(err)
-	data, err := json.Marshal(candidate)
+	next, err := third.snap.upload(ctx, candidate)
 	is.NoErr(err)
-	stream, err := es.js.Stream(ctx, es.stream)
-	is.NoErr(err)
-	info := stream.CachedInfo()
-	err = third.snap.write(ctx, info, data, candidate.Cursor, entry.Revision())
+	err = third.snap.publish(ctx, next, entry.Revision(), nil)
 	is.Err(err, ErrSnapshotConflict)
 	is.Err(err, jetstream.ErrKeyRevisionMismatch)
+	_, err = third.snap.objects.GetInfo(ctx, next.Current)
+	is.Err(err, jetstream.ErrObjectNotFound)
 
-	stored, _, err := third.snap.read(ctx, info)
-	is.NoErr(err)
-	is.Equal(stored.Cursor, second.snapshotCursor())
+	is.Equal(storedManifest(t, third).Cursor, second.snapshotCursor())
 	is.NoErr(third.SaveSnapshot(ctx))
-	stored, _, err = third.snap.read(ctx, info)
-	is.NoErr(err)
-	is.Equal(stored.Cursor, third.snapshotCursor())
+	is.Equal(storedManifest(t, third).Cursor, third.snapshotCursor())
 }
 
-func editEnvelope(edit func(*snapshotEnvelope)) func(*testing.T, []byte) []byte {
+func TestSnapshotSave_StreamRecreatedDuringUploadIsStale(t *testing.T) {
+	is := testutil.NewIs(t)
+	mgr, ctx := newTestManager(t)
+	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "recreated"})
+	is.NoErr(err)
+	cfg := ordersConfig()
+	appendOrderEvents(t, es, "order.1")
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	before, err := m.snap.kv.Get(ctx, m.snap.key)
+	is.NoErr(err)
+	appendOrderEvents(t, es, "order.1")
+	_, err = es.Evolve(ctx, m)
+	is.NoErr(err)
+
+	candidate, err := m.captureSnapshot()
+	is.NoErr(err)
+	next, err := m.snap.upload(ctx, candidate)
+	is.NoErr(err)
+	is.NoErr(mgr.DeleteEventStore(ctx, "recreated"))
+	_, err = mgr.CreateEventStore(ctx, EventStoreConfig{Name: "recreated"})
+	is.NoErr(err)
+
+	err = m.snap.publish(ctx, next, before.Revision(), nil)
+	is.Err(err, ErrSnapshotStale)
+	_, err = m.snap.objects.GetInfo(ctx, next.Current)
+	is.Err(err, jetstream.ErrObjectNotFound)
+	after, err := m.snap.kv.Get(ctx, m.snap.key)
+	is.NoErr(err)
+	is.Equal(after.Revision(), before.Revision())
+}
+
+func TestSnapshotPublishRejected_OnlyDefiniteRejectionsAllowCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"key exists", jetstream.ErrKeyExists, true},
+		{"revision mismatch", jetstream.ErrKeyRevisionMismatch, true},
+		{"wrapped revision mismatch", fmt.Errorf("update: %w", jetstream.ErrKeyRevisionMismatch), true},
+		{"no error", nil, false},
+		{"timeout", nats.ErrTimeout, false},
+		{"deadline", context.DeadlineExceeded, false},
+		{"no responders", nats.ErrNoResponders, false},
+		{"other", errors.New("connection reset"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.NewIs(t).Equal(publishRejected(tc.err), tc.want)
+		})
+	}
+}
+
+func TestSnapshotSave_CoveredWriterDeletesOnlyItsObject(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	cfg := ordersConfig()
+	appendOrderEvents(t, es, "order.1")
+	older, err := LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+	appendOrderEvents(t, es, "order.1")
+	newer, err := LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+	is.NoErr(newer.SaveSnapshot(ctx))
+	current := storedManifest(t, newer)
+
+	candidate, err := older.captureSnapshot()
+	is.NoErr(err)
+	next, err := older.snap.upload(ctx, candidate)
+	is.NoErr(err)
+	is.NoErr(older.snap.publish(ctx, next, 0, nil))
+	_, err = older.snap.objects.GetInfo(ctx, next.Current)
+	is.Err(err, jetstream.ErrObjectNotFound)
+	_, err = older.snap.objects.GetInfo(ctx, current.Current)
+	is.NoErr(err)
+}
+
+func TestSnapshotManifest_StaysSmallRegardlessOfState(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	appendOrderEvents(t, es, "order.1", "order.1")
+	manifestSize := func(name string, blob []byte) int {
+		m, err := LoadModel(ctx, es, &blobState{Blob: blob}, SnapshotConfig{Name: name, Codec: codec.JSON})
+		is.NoErr(err)
+		is.NoErr(m.SaveSnapshot(ctx))
+		entry, err := m.snap.kv.Get(ctx, m.snap.key)
+		is.NoErr(err)
+		return len(entry.Value())
+	}
+
+	small := manifestSize("small", nil)
+	large := manifestSize("large", bytes.Repeat([]byte("x"), 2*int(es.js.Conn().MaxPayload())))
+	is.Equal(large, small)
+	is.True(large < 1024)
+}
+
+func TestSnapshotSave_StoresCodecStateVerbatim(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	_, m, manifest := savedOrdersSnapshot(t)
+	var state []byte
+	is.NoErr(m.View(ctx, func(c *entityCounter) error {
+		var err error
+		state, err = m.snap.config.Codec.Marshal(c)
+		return err
+	}))
+
+	stored, err := m.snap.objects.GetBytes(ctx, manifest.Current)
+	is.NoErr(err)
+	is.True(bytes.HasSuffix(stored, state))
+}
+
+func TestSnapshotSave_ObjectNamesCarryManifestKey(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	appendOrderEvents(t, es, "order.1")
+	current := map[string]string{}
+	var objects jetstream.ObjectStore
+	for _, name := range []string{"first", "second"} {
+		m, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: name, Codec: codec.JSON})
+		is.NoErr(err)
+		is.NoErr(m.SaveSnapshot(ctx))
+		current[m.snap.key] = storedManifest(t, m).Current
+		objects = m.snap.objects
+	}
+
+	listed, err := objects.List(ctx)
+	is.NoErr(err)
+	is.Equal(len(listed), len(current))
+	for _, object := range listed {
+		key, _, ok := strings.Cut(object.Name, ".")
+		is.True(ok)
+		is.Equal(object.Name, current[key])
+	}
+}
+
+func TestSnapshotSave_RetainsCurrentAndPrevious(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	es, m, _ := savedOrdersSnapshot(t)
+
+	advanceAndSave(t, es, m)
+	b := storedManifest(t, m)
+	advanceAndSave(t, es, m)
+	c := storedManifest(t, m)
+	is.Equal(c.Previous, b.Current)
+	listed, err := m.snap.objects.List(ctx)
+	is.NoErr(err)
+	names := make([]string, 0, len(listed))
+	for _, object := range listed {
+		names = append(names, object.Name)
+	}
+	slices.Sort(names)
+	want := []string{b.Current, c.Current}
+	slices.Sort(want)
+	is.Equal(names, want)
+}
+
+type countingCodec struct {
+	codec.Codec
+	marshals *atomic.Int64
+}
+
+func (c countingCodec) Marshal(v any) ([]byte, error) {
+	c.marshals.Add(1)
+	return c.Codec.Marshal(v)
+}
+
+func TestSnapshotSave_CoveredSaveDoesNotEncodeState(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	appendOrderEvents(t, es, "order.1")
+	marshals := &atomic.Int64{}
+	m, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: "orders", Codec: countingCodec{codec.JSON, marshals}})
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	is.NoErr(m.SaveSnapshot(ctx))
+	is.Equal(marshals.Load(), int64(1))
+}
+
+func TestSnapshotSave_SequenceMapLargerThanMaxPayloadRoundTrips(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	cfg := SnapshotConfig{Name: "entities", Codec: codec.JSON}
+	maxPayload := int(es.js.Conn().MaxPayload())
+	id := strings.Repeat("x", 250)
+	entities := 2 * maxPayload / len(id)
+	for i := range entities {
+		_, err := es.Append(ctx, []*Event{{Entity: fmt.Sprintf("order.%s%d", id, i), Data: &OrderPlaced{}}})
+		is.NoErr(err)
+	}
+	m, err := LoadModel(ctx, es, &blobState{}, cfg)
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	object, err := m.snap.objects.GetInfo(ctx, storedManifest(t, m).Current)
+	is.NoErr(err)
+	is.True(object.Size > uint64(maxPayload))
+
+	loaded, err := LoadModel(ctx, es, &blobState{failOn: 1}, cfg)
+	is.NoErr(err)
+	is.Equal(len(loaded.lseq), entities)
+	is.NoErr(loaded.View(ctx, func(s *blobState) error {
+		is.Equal(s.Events, entities)
+		return nil
+	}))
+}
+
+func editStored[T any](edit func(*T)) func(*testing.T, []byte) []byte {
 	return func(t *testing.T, stored []byte) []byte {
-		var env snapshotEnvelope
-		if err := json.Unmarshal(stored, &env); err != nil {
+		var v T
+		if err := json.Unmarshal(stored, &v); err != nil {
 			t.Fatal(err)
 		}
-		edit(&env)
-		data, err := json.Marshal(env)
+		edit(&v)
+		data, err := json.Marshal(v)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -612,37 +833,316 @@ func editEnvelope(edit func(*snapshotEnvelope)) func(*testing.T, []byte) []byte 
 	}
 }
 
-func TestSnapshotLoad_RejectsBadStoredValues(t *testing.T) {
+func editEnvelope(edit func(*snapshotEnvelope)) func(*testing.T, []byte) []byte {
+	return func(t *testing.T, stored []byte) []byte {
+		env, err := decodeSnapshotEnvelope(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edit(env)
+		header, err := env.encodeHeader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(header, env.State...)
+	}
+}
+
+func notJSON(*testing.T, []byte) []byte { return []byte("not json") }
+
+func savedOrdersSnapshot(t *testing.T) (*EventStore, *Model[*entityCounter], *snapshotManifest) {
+	t.Helper()
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	appendOrderEvents(t, es, "order.1")
+	m, err := LoadModel(ctx, es, newCounter(), ordersConfig())
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	return es, m, storedManifest(t, m)
+}
+
+func currentInfo[T any](t testing.TB, m *Model[T]) *jetstream.StreamInfo {
+	t.Helper()
+	info, err := m.snap.streamInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
+func storedManifest[T any](t testing.TB, m *Model[T]) *snapshotManifest {
+	t.Helper()
+	manifest, _, err := m.snap.read(context.Background(), currentInfo(t, m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+func advanceAndSave(t *testing.T, es *EventStore, m *Model[*entityCounter]) {
+	t.Helper()
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	appendOrderEvents(t, es, "order.1")
+	_, err := es.Evolve(ctx, m)
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+}
+
+func TestSnapshotLoad_RejectsBadManifests(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		tamper func(*testing.T, []byte) []byte
 		want   error
 	}{
-		{"not an envelope", func(*testing.T, []byte) []byte { return []byte("not json") }, ErrSnapshotInvalid},
-		{"undecodable state", editEnvelope(func(e *snapshotEnvelope) { e.State = []byte("not json") }), ErrSnapshotInvalid},
-		{"identity", editEnvelope(func(e *snapshotEnvelope) { e.Identity.Tenant = "other" }), ErrSnapshotInvalid},
-		{"generation", editEnvelope(func(e *snapshotEnvelope) { e.Created = time.Time{} }), ErrSnapshotStale},
-		{"future cursor", editEnvelope(func(e *snapshotEnvelope) { e.Cursor = 20 }), ErrSnapshotStale},
-		{"future entity", editEnvelope(func(e *snapshotEnvelope) { e.Sequences["order.1"] = 20 }), ErrSnapshotStale},
+		{"not a manifest", notJSON, ErrSnapshotInvalid},
+		{"identity", editStored(func(m *snapshotManifest) { m.Identity.Tenant = "other" }), ErrSnapshotInvalid},
+		{"format", editStored(func(m *snapshotManifest) { m.Identity.Format = 0 }), ErrSnapshotInvalid},
+		{"no object", editStored(func(m *snapshotManifest) { m.Current = "" }), ErrSnapshotInvalid},
+		{"generation", editStored(func(m *snapshotManifest) { m.Created = time.Time{} }), ErrSnapshotStale},
+		{"future cursor", editStored(func(m *snapshotManifest) { m.Cursor = 20 }), ErrSnapshotStale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			is := testutil.NewIs(t)
-			es := newTestStore(t)
 			ctx := context.Background()
-			cfg := ordersConfig()
-			appendOrderEvents(t, es, "order.1")
-			m, err := LoadModel(ctx, es, newCounter(), cfg)
-			is.NoErr(err)
-			is.NoErr(m.SaveSnapshot(ctx))
+			es, m, _ := savedOrdersSnapshot(t)
 			entry, err := m.snap.kv.Get(ctx, m.snap.key)
 			is.NoErr(err)
 			_, err = m.snap.kv.Put(ctx, m.snap.key, tc.tamper(t, entry.Value()))
 			is.NoErr(err)
 
-			_, err = LoadModel(ctx, es, newCounter(), cfg)
+			_, err = LoadModel(ctx, es, newCounter(), ordersConfig())
 			is.Err(err, tc.want)
 		})
 	}
+}
+
+func TestSnapshotLoad_RejectsBadObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(*testing.T, []byte) []byte
+		want   error
+	}{
+		{"not an envelope", notJSON, ErrSnapshotInvalid},
+		{"shorter than header length", func(*testing.T, []byte) []byte { return []byte{0, 0, 1} }, ErrSnapshotInvalid},
+		{"header length past end", func(_ *testing.T, stored []byte) []byte { return stored[:len(stored)/2] }, ErrSnapshotInvalid},
+		{"header length overflows", func(_ *testing.T, stored []byte) []byte {
+			return append(bytes.Repeat([]byte{0xff}, snapshotHeaderLenSize), stored[snapshotHeaderLenSize:]...)
+		}, ErrSnapshotInvalid},
+		{"undecodable state", editEnvelope(func(e *snapshotEnvelope) { e.State = []byte("not json") }), ErrSnapshotInvalid},
+		{"different identity", editEnvelope(func(e *snapshotEnvelope) { e.Identity.Tenant = "other" }), ErrSnapshotInvalid},
+		{"different cursor", editEnvelope(func(e *snapshotEnvelope) { e.Cursor-- }), ErrSnapshotInvalid},
+		{"no sequences", editEnvelope(func(e *snapshotEnvelope) { e.Sequences = nil }), ErrSnapshotInvalid},
+		{"future entity", editEnvelope(func(e *snapshotEnvelope) { e.Sequences["order.1"] = 20 }), ErrSnapshotStale},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := testutil.NewIs(t)
+			ctx := context.Background()
+			es, m, manifest := savedOrdersSnapshot(t)
+			stored, err := m.snap.objects.GetBytes(ctx, manifest.Current)
+			is.NoErr(err)
+			_, err = m.snap.objects.PutBytes(ctx, manifest.Current, tc.tamper(t, stored))
+			is.NoErr(err)
+
+			_, err = LoadModel(ctx, es, newCounter(), ordersConfig())
+			is.Err(err, tc.want)
+		})
+	}
+}
+
+func TestSnapshotLoad_RejectsMalformedObjectSize(t *testing.T) {
+	for _, name := range []string{"understated", "overstated", "large", "overflow", "max uint64", "zero"} {
+		t.Run(name, func(t *testing.T) {
+			is := testutil.NewIs(t)
+			ctx := context.Background()
+			es, m, manifest := savedOrdersSnapshot(t)
+			info, err := m.snap.objects.GetInfo(ctx, manifest.Current)
+			is.NoErr(err)
+			switch name {
+			case "understated":
+				info.Size--
+			case "overstated":
+				info.Size++
+			case "large":
+				info.Size = 1 << 40
+			case "overflow":
+				info.Size = 1 << 63
+			case "max uint64":
+				info.Size = ^uint64(0)
+			case "zero":
+				info.Size = 0
+			}
+			data, err := json.Marshal(info)
+			is.NoErr(err)
+			subject := "$O." + info.Bucket + ".M." + base64.URLEncoding.EncodeToString([]byte(manifest.Current))
+			_, err = es.js.Publish(ctx, subject, data)
+			is.NoErr(err)
+
+			_, err = LoadModel(ctx, es, newCounter(), ordersConfig())
+			is.Err(err, ErrSnapshotInvalid)
+		})
+	}
+}
+
+func TestSnapshotLoad_RetriesWhenManifestReplacedDuringFetch(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	es, m, _ := savedOrdersSnapshot(t)
+	attempts := 0
+	env, _, err := m.snap.load(ctx, currentInfo(t, m), func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+		attempts++
+		if attempts == 1 {
+			advanceAndSave(t, es, m)
+			advanceAndSave(t, es, m)
+		}
+		return m.snap.fetch(ctx, info, manifest)
+	})
+	is.NoErr(err)
+	is.Equal(attempts, 2)
+	is.Equal(env.Cursor, m.snapshotCursor())
+}
+
+func TestSnapshotLoad_RetriesWhenObjectRetiredDuringDownload(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	es := newTestStore(t)
+	appendOrderEvents(t, es, "order.1")
+	blob := bytes.Repeat([]byte("x"), 16<<20)
+	m, err := LoadModel(ctx, es, &blobState{Blob: blob}, SnapshotConfig{Name: "retired", Codec: codec.JSON})
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	first := true
+	env, _, err := m.snap.load(ctx, currentInfo(t, m), func(fetchCtx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+		if !first {
+			return m.snap.fetch(fetchCtx, info, manifest)
+		}
+		first = false
+		result, err := m.snap.objects.Get(fetchCtx, manifest.Current)
+		if err != nil {
+			return nil, err
+		}
+		defer result.Close()
+		for range 2 {
+			appendOrderEvents(t, es, "order.1")
+			_, err := es.Evolve(ctx, m)
+			is.NoErr(err)
+			is.NoErr(m.SaveSnapshot(ctx))
+		}
+		_, err = io.ReadAll(result)
+		if err == nil {
+			t.Fatal("retired object download unexpectedly completed")
+		}
+		return nil, err
+	})
+	is.NoErr(err)
+	var restored blobState
+	is.NoErr(codec.JSON.Unmarshal(env.State, &restored))
+	is.Equal(restored.Events, 3)
+	is.True(bytes.Equal(restored.Blob, blob))
+}
+
+func TestSnapshotLoad_InvalidObjectWithUnchangedManifestFailsAtOnce(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	_, m, manifest := savedOrdersSnapshot(t)
+	_, err := m.snap.objects.PutBytes(ctx, manifest.Current, []byte("not json"))
+	is.NoErr(err)
+	attempts := 0
+	_, _, err = m.snap.load(ctx, currentInfo(t, m), func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+		attempts++
+		return m.snap.fetch(ctx, info, manifest)
+	})
+	is.Err(err, ErrSnapshotInvalid)
+	is.Equal(attempts, 1)
+}
+
+func TestSnapshotLoad_MissingObjectWithUnchangedManifestRetriesForReplicaLag(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	_, m, manifest := savedOrdersSnapshot(t)
+	data, err := m.snap.objects.GetBytes(ctx, manifest.Current)
+	is.NoErr(err)
+	is.NoErr(m.snap.objects.Delete(ctx, manifest.Current))
+	attempts := 0
+	env, _, err := m.snap.load(ctx, currentInfo(t, m), func(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+		attempts++
+		if attempts == snapshotFetchAttempts {
+			_, err := m.snap.objects.PutBytes(ctx, manifest.Current, data)
+			is.NoErr(err)
+		}
+		return m.snap.fetch(ctx, info, manifest)
+	})
+	is.NoErr(err)
+	is.Equal(attempts, snapshotFetchAttempts)
+	is.Equal(env.Cursor, manifest.Cursor)
+}
+
+func TestSnapshotLoad_StopsRetryingAfterThreeReplacedManifests(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	es, m, _ := savedOrdersSnapshot(t)
+	errUnreadable := errors.New("unreadable")
+	attempts := 0
+	_, _, err := m.snap.load(ctx, currentInfo(t, m), func(context.Context, *jetstream.StreamInfo, *snapshotManifest) (*snapshotEnvelope, error) {
+		attempts++
+		advanceAndSave(t, es, m)
+		return nil, errUnreadable
+	})
+	is.Err(err, errUnreadable)
+	is.Equal(attempts, snapshotFetchAttempts)
+}
+
+func TestSnapshotFetchContext_DefaultsTo30sAndHonoursCallerDeadline(t *testing.T) {
+	is := testutil.NewIs(t)
+	start := time.Now()
+	ctx, cancel := snapshotFetchContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	is.True(ok)
+	is.True(!deadline.Before(start.Add(snapshotFetchTimeout)))
+	is.True(deadline.Before(time.Now().Add(snapshotFetchTimeout + time.Second)))
+	is.Equal(snapshotFetchTimeout, 30*time.Second)
+
+	want := time.Now().Add(time.Hour)
+	caller, cancelCaller := context.WithDeadline(context.Background(), want)
+	defer cancelCaller()
+	ctx, cancel = snapshotFetchContext(caller)
+	defer cancel()
+	deadline, ok = ctx.Deadline()
+	is.True(ok)
+	is.Equal(deadline, want)
+}
+
+func TestSnapshotLoad_AttemptsShareCallerDeadline(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	es, m, _ := savedOrdersSnapshot(t)
+	var deadlines []time.Time
+	_, _, err := m.snap.load(ctx, currentInfo(t, m), func(fetchCtx context.Context, _ *jetstream.StreamInfo, _ *snapshotManifest) (*snapshotEnvelope, error) {
+		deadline, ok := fetchCtx.Deadline()
+		is.True(ok)
+		deadlines = append(deadlines, deadline)
+		advanceAndSave(t, es, m)
+		return nil, errors.New("unreadable")
+	})
+	is.True(err != nil)
+	is.Equal(len(deadlines), snapshotFetchAttempts)
+	for _, deadline := range deadlines {
+		is.Equal(deadline, deadlines[0])
+	}
+}
+
+func TestSnapshotLoad_MissingObjectIsInvalid(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	es, m, manifest := savedOrdersSnapshot(t)
+	is.NoErr(m.snap.objects.Delete(ctx, manifest.Current))
+
+	_, err := LoadModel(ctx, es, newCounter(), ordersConfig())
+	is.Err(err, ErrSnapshotInvalid)
+	is.Err(err, jetstream.ErrObjectNotFound)
 }
 
 func TestSnapshotSave_RefusesUnsafeModels(t *testing.T) {
@@ -680,6 +1180,40 @@ func TestSnapshotLoad_SeparatesTenantsAndVersions(t *testing.T) {
 	is.Err(err, errEvolverRejected)
 }
 
+type blobState struct {
+	Blob   []byte
+	Events int
+	failOn uint64
+}
+
+func (s *blobState) Evolve(_ context.Context, event *Event) error {
+	if event.Sequence() == s.failOn {
+		return errEvolverRejected
+	}
+	s.Events++
+	return nil
+}
+
+func TestSnapshotSave_StateLargerThanMaxPayloadRoundTrips(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+	cfg := SnapshotConfig{Name: "blob", Codec: codec.JSON}
+	appendOrderEvents(t, es, "order.1", "order.1")
+	blob := bytes.Repeat([]byte("x"), 2*int(es.js.Conn().MaxPayload()))
+	m, err := LoadModel(ctx, es, &blobState{Blob: blob}, cfg)
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+
+	loaded, err := LoadModel(ctx, es, &blobState{failOn: 1}, cfg)
+	is.NoErr(err)
+	is.NoErr(loaded.View(ctx, func(s *blobState) error {
+		is.Equal(s.Events, 2)
+		is.True(bytes.Equal(s.Blob, blob))
+		return nil
+	}))
+}
+
 func TestSnapshotLoad_RecreatedStreamIsStale(t *testing.T) {
 	is := testutil.NewIs(t)
 	mgr, ctx := newTestManager(t)
@@ -698,25 +1232,30 @@ func TestSnapshotLoad_RecreatedStreamIsStale(t *testing.T) {
 	is.Err(m.SaveSnapshot(ctx), ErrSnapshotStale)
 }
 
-func TestSnapshotSave_OversizePreservesPrevious(t *testing.T) {
+func TestSnapshotSave_FailedUploadPreservesPrevious(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
-	_, err := es.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "ES_SNAP_store", MaxValueSize: 1024})
+	_, err := es.js.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{Bucket: "ES_SNAP_DATA_store", MaxBytes: 2048})
 	is.NoErr(err)
 	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
 	appendOrderEvents(t, es, "order.1")
 	m, err := LoadModel(ctx, es, newCounter(), cfg)
 	is.NoErr(err)
 	is.NoErr(m.SaveSnapshot(ctx))
-	for i := range 100 {
+	before, err := m.snap.kv.Get(ctx, m.snap.key)
+	is.NoErr(err)
+	for i := range 200 {
 		appendOrderEvents(t, es, "order."+strconv.Itoa(i))
 	}
 	_, err = es.Evolve(ctx, m)
 	is.NoErr(err)
 	if err := m.SaveSnapshot(ctx); err == nil {
-		t.Fatal("oversized save succeeded")
+		t.Fatal("save larger than the data bucket succeeded")
 	}
+	after, err := m.snap.kv.Get(ctx, m.snap.key)
+	is.NoErr(err)
+	is.Equal(after.Revision(), before.Revision())
 	_, err = LoadModel(ctx, es, failsIfReplayed(1), cfg)
 	is.NoErr(err)
 }
@@ -835,7 +1374,7 @@ func TestSnapshotDecisions_DoNotNeedSnapshotBucket(t *testing.T) {
 	ctx := context.Background()
 	m, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: "orders", Codec: codec.JSON})
 	is.NoErr(err)
-	is.NoErr(es.js.DeleteKeyValue(ctx, "ES_SNAP_store"))
+	is.NoErr(es.js.DeleteKeyValue(ctx, "ES_SNAP_META_store"))
 	_, _, err = es.Decide(ctx, m, &Command{Data: "order.1"})
 	is.NoErr(err)
 	_, _, err = es.DecideAndEvolve(ctx, m, &Command{Data: "order.2"})

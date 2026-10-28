@@ -1,11 +1,14 @@
 package rita
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"reflect"
 	"regexp"
@@ -15,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nuid"
 	"github.com/synadia-labs/rita/codec"
 )
 
@@ -24,7 +28,7 @@ var (
 	ErrSnapshotScopeChanged  = errors.New("rita: filters are different from the snapshot filters")
 	ErrSnapshotSkipsEvents   = errors.New("rita: start sequence skips events that the model did not apply")
 	ErrModelBusy             = errors.New("rita: another Evolve or Watch uses this model")
-	ErrEvolvedOutsideStore   = errors.New("rita: snapshot model received events outside the event store")
+	ErrEvolvedOutsideStore   = errors.New("rita: snapshot model received events outside the event store; use EventStore.Evolve or Watch")
 	ErrSnapshotNotConfigured = errors.New("rita: model has no snapshot config")
 	ErrSnapshotInvalid       = errors.New("rita: snapshot is not valid")
 	ErrSnapshotStale         = errors.New("rita: snapshot does not match the stream")
@@ -42,6 +46,13 @@ type SnapshotConfig struct {
 }
 
 func LoadModel[T any](ctx context.Context, store *EventStore, initial T, config SnapshotConfig) (*Model[T], error) {
+	return loadModel(ctx, store, initial, config,
+		func() ([]byte, error) { return config.Codec.Marshal(initial) },
+		func(data []byte) error { return config.Codec.Unmarshal(data, initial) },
+	)
+}
+
+func loadModel[T any](ctx context.Context, store *EventStore, initial T, config SnapshotConfig, encode func() ([]byte, error), restore func([]byte) error) (*Model[T], error) {
 	if err := validateSnapshotConfig(initial, config); err != nil {
 		return nil, err
 	}
@@ -55,19 +66,20 @@ func LoadModel[T any](ctx context.Context, store *EventStore, initial T, config 
 		store:   store,
 		config:  config,
 		filters: filters,
+		encode:  encode,
 	}
 
 	info, err := m.snap.open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	env, _, err := m.snap.read(ctx, info)
+	env, info, err := m.snap.load(ctx, info, m.snap.fetch)
 	if err != nil {
 		return nil, err
 	}
 	m.snap.cursor = max(info.State.FirstSeq, 1) - 1
 	if env != nil {
-		if err := config.Codec.Unmarshal(env.State, m.t); err != nil {
+		if err := restore(env.State); err != nil {
 			return nil, fmt.Errorf("%w: cannot decode state: %w", ErrSnapshotInvalid, err)
 		}
 		m.lseq, m.snap.cursor = env.Sequences, env.Cursor
@@ -100,15 +112,20 @@ func validateSnapshotConfig(initial any, config SnapshotConfig) error {
 type snapshotBinding struct {
 	store   *EventStore
 	kv      jetstream.KeyValue
+	objects jetstream.ObjectStore
 	key     string
 	created time.Time
 	config  SnapshotConfig
 	filters []string
 	cursor  uint64
 	claim   modelClaim
+	encode  func() ([]byte, error)
 }
 
+const snapshotFormat = 1
+
 type snapshotIdentity struct {
+	Format  int
 	Stream  string
 	Tenant  string
 	Name    string
@@ -117,31 +134,67 @@ type snapshotIdentity struct {
 	Filters []string
 }
 
+type snapshotManifest struct {
+	Identity snapshotIdentity
+	Created  time.Time
+	Cursor   uint64
+	Current  string
+	Previous string
+}
+
 type snapshotEnvelope struct {
 	Identity  snapshotIdentity
 	Created   time.Time
 	Cursor    uint64
 	Sequences map[string]uint64
-	State     []byte
+	State     []byte `json:"-"`
+}
+
+const snapshotHeaderLenSize = 8
+
+func (env *snapshotEnvelope) encodeHeader() ([]byte, error) {
+	header, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	out := binary.BigEndian.AppendUint64(make([]byte, 0, snapshotHeaderLenSize+len(header)), uint64(len(header)))
+	return append(out, header...), nil
+}
+
+func decodeSnapshotEnvelope(data []byte) (*snapshotEnvelope, error) {
+	if len(data) < snapshotHeaderLenSize {
+		return nil, errors.New("object is shorter than its header length")
+	}
+	size := binary.BigEndian.Uint64(data)
+	rest := data[snapshotHeaderLenSize:]
+	if size > uint64(len(rest)) {
+		return nil, errors.New("header length exceeds object size")
+	}
+	var env snapshotEnvelope
+	if err := json.Unmarshal(rest[:size], &env); err != nil {
+		return nil, err
+	}
+	env.State = rest[size:]
+	return &env, nil
 }
 
 func (b *snapshotBinding) identity() snapshotIdentity {
-	return snapshotIdentity{b.store.stream, b.store.tenant, b.config.Name, b.config.Version, b.config.Codec.Name(), b.filters}
+	return snapshotIdentity{snapshotFormat, b.store.stream, b.store.tenant, b.config.Name, b.config.Version, b.config.Codec.Name(), b.filters}
 }
 
-func snapshotBucket(storeName string) (string, error) {
-	bucket := "ES_SNAP_" + storeName
-	if !snapshotBucketRegex.MatchString(bucket) {
-		return "", fmt.Errorf("%w: store name %q is not a valid KV bucket name", ErrSnapshotConfigInvalid, storeName)
+func snapshotBuckets(storeName string) (manifests, objects string, err error) {
+	manifests = "ES_SNAP_META_" + storeName
+	if !snapshotBucketRegex.MatchString(manifests) {
+		return "", "", fmt.Errorf("%w: store name %q is not a valid KV bucket name", ErrSnapshotConfigInvalid, storeName)
 	}
-	return bucket, nil
+	return manifests, "ES_SNAP_DATA_" + storeName, nil
 }
 
 func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, error) {
 	if err := b.store.requireTenant(); err != nil {
 		return nil, err
 	}
-	bucket, err := snapshotBucket(b.store.name)
+	bucket, dataBucket, err := snapshotBuckets(b.store.name)
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +212,15 @@ func (b *snapshotBinding) open(ctx context.Context) (*jetstream.StreamInfo, erro
 	if err != nil {
 		return nil, fmt.Errorf("open snapshot bucket: %w", err)
 	}
+	b.objects, err = b.store.js.ObjectStore(ctx, dataBucket)
+	if errors.Is(err, jetstream.ErrBucketNotFound) {
+		b.objects, err = b.store.js.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
+			Bucket: dataBucket, Storage: info.Config.Storage, Replicas: info.Config.Replicas,
+		})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot data bucket: %w", err)
+	}
 	identity, err := json.Marshal(b.identity())
 	if err != nil {
 		return nil, err
@@ -175,11 +237,11 @@ func (b *snapshotBinding) streamInfo(ctx context.Context) (*jetstream.StreamInfo
 	return stream.CachedInfo(), nil
 }
 
-func covers(previous *snapshotEnvelope, cursor uint64) bool {
+func covers(previous *snapshotManifest, cursor uint64) bool {
 	return previous != nil && previous.Cursor >= cursor
 }
 
-func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) (*snapshotEnvelope, uint64, error) {
+func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) (*snapshotManifest, uint64, error) {
 	entry, err := b.kv.Get(ctx, b.key)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
 		return nil, 0, nil
@@ -187,28 +249,126 @@ func (b *snapshotBinding) read(ctx context.Context, info *jetstream.StreamInfo) 
 	if err != nil {
 		return nil, 0, fmt.Errorf("read snapshot: %w", err)
 	}
-	var env snapshotEnvelope
-	if err := json.Unmarshal(entry.Value(), &env); err != nil {
+	var manifest snapshotManifest
+	if err := json.Unmarshal(entry.Value(), &manifest); err != nil {
 		return nil, 0, fmt.Errorf("%w: cannot decode stored value: %w", ErrSnapshotInvalid, err)
 	}
 	switch {
-	case !reflect.DeepEqual(env.Identity, b.identity()):
+	case !reflect.DeepEqual(manifest.Identity, b.identity()):
 		return nil, 0, fmt.Errorf("%w: stored value is for a different snapshot config", ErrSnapshotInvalid)
-	case env.Sequences == nil:
-		return nil, 0, fmt.Errorf("%w: stored value has no entity sequences", ErrSnapshotInvalid)
+	case manifest.Current == "":
+		return nil, 0, fmt.Errorf("%w: stored value names no snapshot object", ErrSnapshotInvalid)
 	}
-	if !env.Created.Equal(info.Created) || env.Cursor > info.State.LastSeq {
+	if staleAgainst(info, manifest.Created, manifest.Cursor) {
 		return nil, 0, ErrSnapshotStale
+	}
+	return &manifest, entry.Revision(), nil
+}
+
+type snapshotFetch func(context.Context, *jetstream.StreamInfo, *snapshotManifest) (*snapshotEnvelope, error)
+
+const (
+	snapshotFetchAttempts = 3
+	snapshotFetchTimeout  = 30 * time.Second
+	snapshotFetchBackoff  = 50 * time.Millisecond
+
+	snapshotDownloadPrealloc uint64 = 8 << 20
+)
+
+func snapshotFetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, snapshotFetchTimeout)
+}
+
+func (b *snapshotBinding) load(ctx context.Context, info *jetstream.StreamInfo, fetch snapshotFetch) (*snapshotEnvelope, *jetstream.StreamInfo, error) {
+	var fetchErr error
+	for attempt := range snapshotFetchAttempts {
+		if attempt > 0 {
+			var err error
+			if info, err = b.streamInfo(ctx); err != nil {
+				return nil, nil, err
+			}
+		}
+		manifest, revision, err := b.read(ctx, info)
+		if err != nil || manifest == nil {
+			return nil, info, err
+		}
+		fetchCtx, cancel := snapshotFetchContext(ctx)
+		env, err := fetch(fetchCtx, info, manifest)
+		cancel()
+		if err == nil {
+			return env, info, nil
+		}
+		fetchErr = err
+		latest, err := b.kv.Get(ctx, b.key)
+		if err != nil {
+			return nil, nil, fetchErr
+		}
+		if latest.Revision() != revision {
+			continue
+		}
+		if !errors.Is(fetchErr, jetstream.ErrObjectNotFound) || attempt == snapshotFetchAttempts-1 {
+			return nil, nil, fetchErr
+		}
+		select {
+		case <-time.After(snapshotFetchBackoff * time.Duration(attempt+1)):
+		case <-ctx.Done():
+			return nil, nil, fetchErr
+		}
+	}
+	return nil, nil, fetchErr
+}
+
+func (b *snapshotBinding) fetch(ctx context.Context, info *jetstream.StreamInfo, manifest *snapshotManifest) (*snapshotEnvelope, error) {
+	data, err := b.download(ctx, manifest.Current)
+	if errors.Is(err, jetstream.ErrObjectNotFound) {
+		return nil, fmt.Errorf("%w: snapshot object %q: %w", ErrSnapshotInvalid, manifest.Current, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot object %q: %w", manifest.Current, err)
+	}
+	env, err := decodeSnapshotEnvelope(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot decode snapshot object: %w", ErrSnapshotInvalid, err)
+	}
+	switch {
+	case !reflect.DeepEqual(env.Identity, manifest.Identity) || !env.Created.Equal(manifest.Created) || env.Cursor != manifest.Cursor:
+		return nil, fmt.Errorf("%w: snapshot object does not match its manifest", ErrSnapshotInvalid)
+	case env.Sequences == nil:
+		return nil, fmt.Errorf("%w: snapshot object has no entity sequences", ErrSnapshotInvalid)
 	}
 	for entity, seq := range env.Sequences {
 		if !validEntity(entity) {
-			return nil, 0, fmt.Errorf("%w: entity %q is not valid", ErrSnapshotInvalid, entity)
+			return nil, fmt.Errorf("%w: entity %q is not valid", ErrSnapshotInvalid, entity)
 		}
 		if seq > info.State.LastSeq {
-			return nil, 0, ErrSnapshotStale
+			return nil, ErrSnapshotStale
 		}
 	}
-	return &env, entry.Revision(), nil
+	return env, nil
+}
+
+func (b *snapshotBinding) download(ctx context.Context, object string) ([]byte, error) {
+	result, err := b.objects.Get(ctx, object)
+	if err != nil {
+		return nil, err
+	}
+	defer result.Close()
+	info, err := result.Info()
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	buf.Grow(int(min(info.Size, snapshotDownloadPrealloc)))
+	if _, err := buf.ReadFrom(result); err != nil {
+		return nil, err
+	}
+	if uint64(buf.Len()) != info.Size {
+		return nil, fmt.Errorf("%w: snapshot object size does not match metadata", ErrSnapshotInvalid)
+	}
+	return buf.Bytes(), nil
 }
 
 func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
@@ -216,29 +376,70 @@ func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
 	if b == nil {
 		return ErrSnapshotNotConfigured
 	}
-	candidate, err := m.captureSnapshot()
+	cursor, err := m.savableCursor()
 	if err != nil {
 		return err
-	}
-	data, err := json.Marshal(candidate)
-	if err != nil {
-		return fmt.Errorf("encode snapshot: %w", err)
 	}
 	info, err := b.streamInfo(ctx)
 	if err != nil {
 		return err
 	}
-	if !b.created.Equal(info.Created) || candidate.Cursor > info.State.LastSeq {
+	if staleAgainst(info, b.created, cursor) {
 		return ErrSnapshotStale
 	}
 	previous, revision, err := b.read(ctx, info)
 	if err != nil {
 		return err
 	}
-	if covers(previous, candidate.Cursor) {
+	if covers(previous, cursor) {
 		return nil
 	}
-	return b.write(ctx, info, data, candidate.Cursor, revision)
+	candidate, err := m.captureSnapshot()
+	if err != nil {
+		return err
+	}
+	next, err := b.upload(ctx, candidate)
+	if err != nil {
+		return err
+	}
+	return b.publish(ctx, next, revision, previous)
+}
+
+func (m *Model[T]) savableCursor() (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if err := m.evolveFailureLocked(); err != nil {
+		return 0, err
+	}
+	return m.snap.cursor, nil
+}
+
+func staleAgainst(info *jetstream.StreamInfo, created time.Time, cursor uint64) bool {
+	return !created.Equal(info.Created) || cursor > info.State.LastSeq
+}
+
+func (b *snapshotBinding) upload(ctx context.Context, candidate snapshotEnvelope) (snapshotManifest, error) {
+	header, err := candidate.encodeHeader()
+	if err != nil {
+		return snapshotManifest{}, fmt.Errorf("encode snapshot: %w", err)
+	}
+	object := b.key + "." + nuid.Next()
+	body := io.MultiReader(bytes.NewReader(header), bytes.NewReader(candidate.State))
+	if _, err := b.objects.Put(ctx, jetstream.ObjectMeta{Name: object}, body); err != nil {
+		return snapshotManifest{}, fmt.Errorf("upload snapshot: %w", err)
+	}
+	return snapshotManifest{
+		Identity: candidate.Identity, Created: candidate.Created, Cursor: candidate.Cursor, Current: object,
+	}, nil
+}
+
+func (b *snapshotBinding) retire(ctx context.Context, object string) {
+	if object == "" {
+		return
+	}
+	if err := b.objects.Delete(ctx, object); err != nil && !errors.Is(err, jetstream.ErrObjectNotFound) {
+		b.store.logger.Warn("snapshot object cleanup failed", "object", object, "error", err)
+	}
 }
 
 func (m *Model[T]) captureSnapshot() (snapshotEnvelope, error) {
@@ -247,7 +448,7 @@ func (m *Model[T]) captureSnapshot() (snapshotEnvelope, error) {
 	if err := m.evolveFailureLocked(); err != nil {
 		return snapshotEnvelope{}, err
 	}
-	state, err := m.snap.config.Codec.Marshal(m.t)
+	state, err := m.snap.encode()
 	if err != nil {
 		return snapshotEnvelope{}, fmt.Errorf("encode snapshot state: %w", err)
 	}
@@ -257,27 +458,49 @@ func (m *Model[T]) captureSnapshot() (snapshotEnvelope, error) {
 	}, nil
 }
 
-func (b *snapshotBinding) write(ctx context.Context, info *jetstream.StreamInfo, data []byte, cursor, revision uint64) error {
-	var err error
+func publishRejected(err error) bool {
+	return errors.Is(err, jetstream.ErrKeyExists) || errors.Is(err, jetstream.ErrKeyRevisionMismatch)
+}
+
+func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, revision uint64, previous *snapshotManifest) error {
+	info, err := b.streamInfo(ctx)
+	if err != nil {
+		return err
+	}
+	if staleAgainst(info, next.Created, next.Cursor) {
+		b.retire(ctx, next.Current)
+		return ErrSnapshotStale
+	}
+	if previous != nil {
+		next.Previous = previous.Current
+	}
+	data, err := json.Marshal(next)
+	if err != nil {
+		return fmt.Errorf("encode snapshot manifest: %w", err)
+	}
 	if revision == 0 {
 		_, err = b.kv.Create(ctx, b.key, data)
 	} else {
 		_, err = b.kv.Update(ctx, b.key, data, revision)
 	}
-	if err == nil {
+	switch {
+	case err == nil:
+		if previous != nil {
+			b.retire(ctx, previous.Previous)
+		}
+		return nil
+	case !publishRejected(err):
+		return fmt.Errorf("save snapshot: %w", err)
+	}
+	b.retire(ctx, next.Current)
+	current, _, readErr := b.read(ctx, info)
+	if readErr != nil {
+		return readErr
+	}
+	if covers(current, next.Cursor) {
 		return nil
 	}
-	if errors.Is(err, jetstream.ErrKeyExists) || errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
-		previous, _, readErr := b.read(ctx, info)
-		if readErr != nil {
-			return readErr
-		}
-		if covers(previous, cursor) {
-			return nil
-		}
-		return fmt.Errorf("%w: %w", ErrSnapshotConflict, err)
-	}
-	return fmt.Errorf("save snapshot: %w", err)
+	return fmt.Errorf("%w: %w", ErrSnapshotConflict, err)
 }
 
 func normalizeFilters(filters []string) ([]string, error) {

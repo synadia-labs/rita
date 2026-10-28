@@ -82,7 +82,7 @@ Each pattern has a complete, runnable program under [`examples/`](./examples):
 | --- | --- |
 | [`quickstart`](./examples/quickstart) | Append events and rebuild state. |
 | [`deciders`](./examples/deciders) | Command → events → state through a model. |
-| [`snapshots`](./examples/snapshots) | Explicit KV snapshot, fresh-state restore, and tail replay. |
+| [`snapshots`](./examples/snapshots) | Explicit snapshot, fresh-state restore, and tail replay. |
 | [`optimistic-concurrency`](./examples/optimistic-concurrency) | Expected-sequence guarding and retry. |
 | [`projection`](./examples/projection) | A live read model via `Watch`. |
 | [`tenancy`](./examples/tenancy) | One store, many isolated tenants. |
@@ -91,8 +91,8 @@ Each pattern has a complete, runnable program under [`examples/`](./examples):
 
 ## Snapshots
 
-A snapshot saves a model's state to a KV bucket, so the next load only
-replays the events added since the save, not the whole history.
+A snapshot saves a model's state to a NATS Object Store, so the next load
+only replays the events added since the save, not the whole history.
 
 ```go
 model, err := rita.LoadModel(ctx, es, &Order{}, rita.SnapshotConfig{
@@ -114,8 +114,8 @@ if err := model.SaveSnapshot(ctx); err != nil {
 `SaveSnapshot` stores the current state. Always pass a new, empty state
 value to `LoadModel`.
 
-See [Reading state](./docs/reading-state.md#snapshots) for codecs, live
-models, and when a snapshot is rejected.
+See [Reading state](./docs/reading-state.md#snapshots) for codecs, storage
+and permissions, live models, and when a snapshot is rejected.
 
 ## Documentation
 

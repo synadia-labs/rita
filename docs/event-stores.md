@@ -110,29 +110,40 @@ delete the snapshot bucket. Delete it yourself if you do not need it.
 
 If you create a store with the same name again, Rita does not use the old
 snapshots. `LoadModel` returns `ErrSnapshotStale`. To continue, change
-`Version` or delete the snapshot bucket.
+`Version` or delete the snapshot buckets.
 
 ## Snapshot storage
 
-Each store keeps its snapshots in a KV bucket named `ES_SNAP_<store name>`.
-`LoadModel` creates the bucket if it does not exist. Each snapshot config
-has one key in the bucket.
+Each store keeps its snapshots in two buckets. `LoadModel` creates them if
+they do not exist:
+
+- **`ES_SNAP_DATA_<store name>`**, an Object Store, holds the snapshots
+  themselves. The server splits each one into chunks, so a snapshot can be
+  larger than the server's `max_payload`.
+- **`ES_SNAP_META_<store name>`**, a KV bucket, has one key for each snapshot
+  config. Its small value names the current snapshot and the one before it.
 
 The store name must contain only letters, digits, `-` and `_`. Other names
-cannot make a valid bucket name, and `LoadModel` returns
+cannot make valid bucket names, and `LoadModel` returns
 `ErrSnapshotConfigInvalid`.
 
-The new bucket uses the same storage type and replica count as the stream. It
-keeps one revision per key and has no TTL. `UpdateEventStore` does not change
-the bucket.
+The new buckets use the same storage type and replica count as the stream.
+The KV bucket keeps one revision per key. Neither bucket has a TTL.
+`UpdateEventStore` does not change the buckets.
 
-Your credentials need permission to read stream info and to read and write the
-bucket. If your credentials cannot create buckets, create the bucket before
-you start.
+Your credentials need permission to read stream info and to read and write
+both buckets: the `KV_ES_SNAP_META_<store name>` and `OBJ_ES_SNAP_DATA_<store name>`
+streams, and the `$KV.ES_SNAP_META_<store name>.>` and
+`$O.ES_SNAP_DATA_<store name>.>` subjects. If your credentials cannot create
+buckets, create both before you start.
 
-Each snapshot must fit in one KV value. The server `max_payload` and the
-bucket `MaxValueSize` set the limit. If a snapshot is too large, the save
-fails and the previous snapshot stays.
+A save uploads a new snapshot, then points the KV value at it. Rita keeps the
+current snapshot and the previous one, so a load that started before a save
+can still finish. If a process stops between those two steps, or the KV write
+times out, an unused snapshot can stay in the Object Store. Rita does not
+remove these yet; their names start with the KV key they were saved for.
+
+If an upload fails, the save fails and the previous snapshot stays.
 
 Snapshots do not make it safe to remove events from the stream. See
 [When a snapshot is rejected](./reading-state.md#when-a-snapshot-is-rejected).

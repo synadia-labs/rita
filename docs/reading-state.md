@@ -90,9 +90,9 @@ effects that must not be lost across restarts, use a
 
 ## Snapshots
 
-A snapshot keeps a copy of a model's state in a KV bucket. When you load the
-model again, Rita only replays the events after the snapshot. Snapshots are
-optional. `NewModel` does not use KV.
+A snapshot keeps a copy of a model's state outside the event stream. When you
+load the model again, Rita only replays the events after the snapshot.
+Snapshots are optional. `NewModel` does not use them.
 
 ```go
 model, err := rita.LoadModel(ctx, es, &Order{}, rita.SnapshotConfig{
@@ -117,6 +117,38 @@ if err := model.SaveSnapshot(ctx); err != nil {
   the call. Use `View` to read the state.
 - **Change `Version`** when you change the state fields or the `Evolve` logic.
   Rita then ignores the old snapshot and replays all events.
+
+### Where snapshots are stored
+
+Snapshots live in an Object Store beside the stream, so a snapshot can be
+larger than the server's maximum message size. See
+[Snapshot storage](./event-stores.md#snapshot-storage) for the bucket names,
+permissions, and which snapshots Rita keeps.
+
+`LoadModel` gives each snapshot download attempt 30 seconds when `ctx` has
+no deadline. If a save replaces the snapshot during a download, Rita can
+retry up to three attempts. A caller deadline limits the whole load,
+including retries. For a large snapshot, pass a `ctx` with a longer deadline.
+
+### What to snapshot
+
+Use a snapshot when a model gets many events but its state stays a size you
+can hold in memory. Each save encodes the whole state, and each load reads
+the whole snapshot into memory.
+
+A model that watches the whole store also keeps a sequence for every entity
+it sees, about 25 bytes each, even for events it ignores. Set `Filters` to
+keep that list to the model's own entities.
+
+Do not use a snapshot for:
+
+- **State that grows without limit**, such as a full history. Use a
+  [reactor](./reactors.md) that writes one KV key for each entity.
+- **Secrets or data you must be able to erase.** A snapshot is a second copy
+  of the persisted state, outside the stream, and Rita does not encrypt it.
+
+If a save fails, the previous snapshot stays. `LoadModel` then replays more
+events at each start.
 
 ### Keeping a snapshot current
 
@@ -148,11 +180,11 @@ problem with the snapshot returns an error:
 
 | Error | Cause |
 | --- | --- |
-| `ErrSnapshotInvalid` | Rita cannot decode the stored snapshot. |
-| `ErrSnapshotStale` | Someone deleted and created the stream again, or the stream is behind the snapshot. Change `Version` or delete the key. |
+| `ErrSnapshotInvalid` | Rita cannot decode the stored snapshot, or the snapshot it names is missing. |
+| `ErrSnapshotStale` | Someone deleted and created the stream again, or the stream is behind the snapshot. Change `Version`. |
 | `ErrSnapshotHistoryGap` | Retention or a purge removed events after the snapshot. This applies to all events in the stream, not only the model's filters. |
 | `ErrSnapshotScopeChanged` | You gave `Evolve` or `Watch` different filters. |
-| `ErrEvolvedOutsideStore` | You called `model.Evolve` directly. |
+| `ErrEvolvedOutsideStore` | You called `model.Evolve` directly. Use `es.Evolve` or `es.Watch`. |
 
 If `Evolve` fails, or a watch cannot apply an event, the model stops. It
 cannot save. Load a new model.
