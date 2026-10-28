@@ -191,6 +191,7 @@ func TestFailedEvolve_WatcherCannotDecodeNewEventType_RefusesDecide(t *testing.T
 	releaseOne := deploy.store(releaseOneParcelTypes())
 	model := NewModel(&ParcelReleaseOne{})
 	watchUntilAddress(t, releaseOne, model, releaseOneAddress, "2 New St")
+	is.Err(model.EvolveErr(), types.ErrTypeNotRegistered)
 
 	_, _, err := releaseOne.Decide(ctx, model, &Command{Data: &ShipParcel{}})
 	is.Err(err, ErrEvolveFailed)
@@ -248,6 +249,61 @@ func TestFailedEvolve_ModelRebuiltOnNewRelease_DecidesOnFullHistory(t *testing.T
 	is.Err(err, ErrEvolveFailed)
 
 	releaseTwo, rebuilt, _ := deploy.rebuiltOnReleaseTwo()
+	is.NoErr(rebuilt.EvolveErr())
+	_, _, err = releaseTwo.Decide(ctx, rebuilt, &Command{Data: &ShipParcel{}})
+	is.Err(err, errParcelRefunded)
+}
+
+func TestFailedEvolve_RebuildOnSameRelease_FailsAgain(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	deploy := newParcelDeploy(t)
+	deploy.releaseTwoRefundsThenChangesAddress()
+
+	releaseOne := deploy.store(releaseOneParcelTypes())
+	stale := NewModel(&ParcelReleaseOne{})
+	watchUntilAddress(t, releaseOne, stale, releaseOneAddress, "2 New St")
+	_, _, err := releaseOne.Decide(ctx, stale, &Command{Data: &ShipParcel{}})
+	is.Err(err, ErrEvolveFailed)
+
+	rebuilt := NewModel(&ParcelReleaseOne{})
+	watchUntilAddress(t, releaseOne, rebuilt, releaseOneAddress, "2 New St")
+	is.Err(rebuilt.EvolveErr(), ErrEvolveFailed)
+	is.Err(rebuilt.EvolveErr(), types.ErrTypeNotRegistered)
+}
+
+var errAddressServiceDown = errors.New("address service unavailable")
+
+type ParcelWithFlakyEvolve struct {
+	ParcelReleaseTwo
+	failNext bool
+}
+
+func (p *ParcelWithFlakyEvolve) Evolve(ctx context.Context, event *Event) error {
+	if p.failNext {
+		p.failNext = false
+		return errAddressServiceDown
+	}
+	return p.ParcelReleaseTwo.Evolve(ctx, event)
+}
+
+func TestFailedEvolve_TemporaryEvolverError_RebuildRecovers(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	deploy := newParcelDeploy(t)
+	deploy.releaseTwoRefundsThenChangesAddress()
+	releaseTwo := deploy.store(releaseTwoParcelTypes())
+
+	flaky := NewModel(&ParcelWithFlakyEvolve{failNext: true})
+	_, err := releaseTwo.Evolve(ctx, flaky)
+	is.Err(err, errAddressServiceDown)
+	is.Err(flaky.EvolveErr(), errAddressServiceDown)
+
+	rebuilt := NewModel(&ParcelWithFlakyEvolve{})
+	_, err = releaseTwo.Evolve(ctx, rebuilt)
+	is.NoErr(err)
+	is.NoErr(rebuilt.EvolveErr())
+
 	_, _, err = releaseTwo.Decide(ctx, rebuilt, &Command{Data: &ShipParcel{}})
 	is.Err(err, errParcelRefunded)
 }

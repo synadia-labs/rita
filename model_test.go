@@ -90,12 +90,6 @@ func (c *failingCounter) Decide(ctx context.Context, cmd *Command) ([]*Event, er
 
 var errEvolverRejected = errors.New("evolve failed")
 
-func (m *Model[T]) evolveFailure() error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.evolveFailureLocked()
-}
-
 func TestModel_FailedEvolve_DoesNotAdvanceSequence(t *testing.T) {
 	is := testutil.NewIs(t)
 
@@ -141,18 +135,41 @@ func TestModel_FailedEvolveFollowedByLaterEvent_StillRefusesDecide(t *testing.T)
 	is.Err(err, ErrEvolveFailed)
 }
 
-func TestModel_FailedEvolve_RecordsFailure(t *testing.T) {
+func TestModel_EvolveErr_NilUntilAnEvolveFails(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&failingCounter{failOn: 2})
+	is.NoErr(m.EvolveErr())
+
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}))
+	is.NoErr(m.EvolveErr())
+}
+
+func TestModel_EvolveErr_ReportsFailureWrappedInErrEvolveFailed(t *testing.T) {
 	is := testutil.NewIs(t)
 
 	ctx := context.Background()
 	m := NewModel(&failingCounter{failOn: 2})
 
 	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 1}))
-	is.NoErr(m.evolveFailure())
+	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
+
+	is.Err(m.EvolveErr(), ErrEvolveFailed)
+	is.Err(m.EvolveErr(), errEvolverRejected)
+}
+
+func TestModel_EvolveErr_StaysAfterLaterEventsSucceed(t *testing.T) {
+	is := testutil.NewIs(t)
+
+	ctx := context.Background()
+	m := NewModel(&failingCounter{failOn: 2})
 
 	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errEvolverRejected)
-	is.Err(m.evolveFailure(), ErrEvolveFailed)
-	is.Err(m.evolveFailure(), errEvolverRejected)
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 3}))
+	is.NoErr(m.Evolve(ctx, &Event{Entity: "counter.2", sequence: 4}))
+
+	is.Err(m.EvolveErr(), errEvolverRejected)
 }
 
 func TestModel_RepeatedFailedEvolve_KeepsFirstCause(t *testing.T) {
@@ -165,7 +182,7 @@ func TestModel_RepeatedFailedEvolve_KeepsFirstCause(t *testing.T) {
 	m.e = evolverFunc(func(context.Context, *Event) error { return errLaterFailure })
 	is.Err(m.Evolve(ctx, &Event{Entity: "counter.1", sequence: 2}), errLaterFailure)
 
-	err := m.evolveFailure()
+	err := m.EvolveErr()
 	is.Err(err, errEvolverRejected)
 	is.True(!errors.Is(err, errLaterFailure))
 }
@@ -262,7 +279,7 @@ func TestModel_MutateThenFail_RetryKeepsFailureRecorded(t *testing.T) {
 	is.NoErr(m.Evolve(ctx, ev))
 
 	is.Equal(state.Count, 2)
-	is.Err(m.evolveFailure(), errEvolverRejected)
+	is.Err(m.EvolveErr(), errEvolverRejected)
 }
 
 func TestModel_NotImplemented(t *testing.T) {

@@ -207,6 +207,12 @@ func (m *Model[T]) View(ctx context.Context, fn func(T) error) error {
 	return fn(m.t)
 }
 
+func (m *Model[T]) EvolveErr() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.evolveFailureLocked()
+}
+
 func NewModel[T any](t T) *Model[T] {
 	m := &Model[T]{}
 	m.t = t

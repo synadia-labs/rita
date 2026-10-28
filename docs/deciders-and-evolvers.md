@@ -136,11 +136,10 @@ step.
 > `NewModel` and the `DecideAndEvolve` command loop are lines 114–121, `View` is
 > 123–129, and a rejected decision is 131–135.
 
-> **Partial-failure note.** If the evolve step fails *after* the append
-> succeeded, the events are already stored but the model is missing some of
-> them. The model then refuses every later `Decide` (see
-> [failed evolves](#failed-evolves)). Build a new model and replay it to
-> continue.
+> **Partial-failure note.** If the evolve step fails after the append, the
+> stream has the events, but the model does not. The model then refuses
+> every later `Decide`. See [failed evolves](#failed-evolves). To continue,
+> build a new model and replay it.
 
 ## Model
 
@@ -179,35 +178,66 @@ the type doesn't support returns `ErrDeciderNotImplemented` or
 
 ### Failed evolves
 
-An event can fail to apply. The usual cause is a deploy: a newer release
-appends an event type that an older release cannot decode, or that its evolver
-does not handle. A field whose type changed can also stop old events from
-decoding.
+A model cannot apply an event when it cannot decode the event, or when your
+evolver returns an error. This can occur when the code that reads a store is
+different from the code that wrote it. For example:
 
-Once that happens the model's state is missing an event, and its sequences can
-no longer be trusted. A later event for the same entity would move the
-sequence past the missing one, so a `Decide` could pass the
-[optimistic concurrency](#optimistic-concurrency) check against state that
-never saw it. To prevent that, a model that has failed to apply an event
-refuses every later `Decide`, for all entities, with `ErrEvolveFailed`. The
-error wraps the first failure:
+- During a rollout, an older release reads an event type that a newer
+  release wrote.
+- After a rollback, the older release reads events that the newer release
+  wrote.
+- Two services share a store, and their type registries are different.
+- A field type changed, and old events no longer decode.
+
+After a failed evolve, the state of the model does not include that event.
+A later event for the same entity moves the sequence past it. Then `Decide`
+can pass the [optimistic concurrency](#optimistic-concurrency) check with
+incorrect state.
+
+To prevent this, the model refuses every later `Decide`, for all entities.
+It returns `ErrEvolveFailed`, which wraps the first failure:
 
 ```go
 _, _, err := es.Decide(ctx, model, cmd)
 if errors.Is(err, rita.ErrEvolveFailed) {
-	// rebuild: a new model replayed by a release that knows the event
+	return err
 }
 ```
 
-This covers failures from `Evolve`, `DecideAndEvolve` and `Watch`, whether the
-event failed to decode or your evolver returned an error. A watcher keeps
-running after a failure, so `View` still sees later events, and your
-`WithErrHandler` callback is still called. The model never clears the failure.
-To decide again, build a new model and replay it.
+This applies to `Evolve`, `DecideAndEvolve` and `Watch`. The watcher
+continues after a failure. `View` shows the later events. Rita calls your
+`WithErrHandler` callback.
 
-This protection comes from `Model[T]`. An evolver you pass to `Evolve`,
-`DecideAndEvolve` or `Watch` without wrapping it in `NewModel` gets no record
-of the failure, and nothing stops its next decision.
+The model does not clear the failure. To decide again, build a new model
+and replay it.
+
+#### Recover from a failed evolve
+
+`EvolveErr` returns the same error as `Decide`, but it does not decide. Use
+it in health checks and in `View` paths that must not show incomplete state.
+Also use it to check a new model before you use it. `Watch` does not return
+the error, so check the new model after the watch starts:
+
+```go
+fresh := rita.NewModel(&Order{})
+w, err := es.Watch(ctx, fresh)
+if err != nil {
+	return err
+}
+if err := fresh.EvolveErr(); err != nil {
+	w.Stop()
+	return err
+}
+```
+
+If the first failure was temporary, for example a cancelled context, the new
+model applies the event. If the new model fails again, a new model cannot fix
+the cause. For example, this release does not know the event type. Deploy a
+release that handles the event.
+
+Only `Model[T]` gives this protection. If you do not wrap your evolver in
+`NewModel`, Rita does not record the failure and does not stop the next
+decision.
 
 ## Optimistic concurrency
 
