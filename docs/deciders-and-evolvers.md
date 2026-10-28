@@ -205,6 +205,10 @@ running after a failure, so `View` still sees later events, and your
 `WithErrHandler` callback is still called. The model never clears the failure.
 To decide again, build a new model and replay it.
 
+This protection comes from `Model[T]`. An evolver you pass to `Evolve`,
+`DecideAndEvolve` or `Watch` without wrapping it in `NewModel` gets no record
+of the failure, and nothing stops its next decision.
+
 ## Optimistic concurrency
 
 When two writers act on the same entity concurrently, you want the second write
