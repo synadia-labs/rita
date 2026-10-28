@@ -169,6 +169,13 @@ if err := model.SaveSnapshot(ctx); err != nil {
 filters. Run only one `Evolve` or `Watch` at a time on a model. At shutdown,
 stop the watch before you save.
 
+`es.Evolve` and the catch-up of `es.Watch` move the position to the end of
+the stream, also past events that your filters do not match. After the
+catch-up, a watch moves the position only for events that your filters match.
+If the stream has retention limits and your entities get few events, call
+`es.Evolve` before you save. Then retention of other events cannot cause
+`ErrSnapshotHistoryGap`.
+
 Rita does not save snapshots automatically. Your application calls
 `SaveSnapshot`. If the stored snapshot is the same or newer, the save does
 nothing. If two writers save at the same time, one gets `ErrSnapshotConflict`.

@@ -322,7 +322,7 @@ func TestSnapshotDecideAndEvolve_FailedEvolveIsRecorded(t *testing.T) {
 	is.Err(err, ErrEvolveFailed)
 }
 
-func TestSnapshotModel_DirectEvolveIsRecorded(t *testing.T) {
+func TestSnapshotModel_DirectEvolveIsRefusedAndRecorded(t *testing.T) {
 	is := testutil.NewIs(t)
 	es := newTestStore(t)
 	ctx := context.Background()
@@ -330,8 +330,93 @@ func TestSnapshotModel_DirectEvolveIsRecorded(t *testing.T) {
 	m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
 	is.NoErr(err)
 
-	is.NoErr(m.Evolve(ctx, &Event{Entity: "order.1", sequence: 1}))
+	is.Err(m.Evolve(ctx, &Event{Entity: "order.1", sequence: 1}), ErrEvolvedOutsideStore)
 	is.Err(m.EvolveErr(), ErrEvolvedOutsideStore)
+	is.Equal(counts(t, m), map[string]int{})
+	is.Equal(m.lseq["order.1"], uint64(0))
+}
+
+func newRetainedStore(t *testing.T, maxMsgs int64) *EventStore {
+	t.Helper()
+	mgr, ctx := newTestManager(t)
+	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "retained", MaxMsgs: maxMsgs})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	return es
+}
+
+func TestSnapshotCatchUp_QuietScopeSurvivesRetentionOfOtherEntities(t *testing.T) {
+	catchUps := map[string]func(context.Context, *EventStore, *Model[*entityCounter]) error{
+		"evolve": func(ctx context.Context, es *EventStore, m *Model[*entityCounter]) error {
+			_, err := es.Evolve(ctx, m)
+			return err
+		},
+		"watch": func(ctx context.Context, es *EventStore, m *Model[*entityCounter]) error {
+			w, err := es.Watch(ctx, m)
+			if err != nil {
+				return err
+			}
+			w.Stop()
+			return nil
+		},
+	}
+	for name, catchUp := range catchUps {
+		t.Run(name, func(t *testing.T) {
+			is := testutil.NewIs(t)
+			ctx := context.Background()
+			es := newRetainedStore(t, 3)
+
+			appendOrderEvents(t, es, "order.1")
+			m, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
+			is.NoErr(err)
+
+			appendOrderEvents(t, es, "invoice.1", "invoice.1")
+			is.NoErr(catchUp(ctx, es, m))
+			is.Equal(m.snapshotCursor(), uint64(3))
+			is.NoErr(m.SaveSnapshot(ctx))
+
+			appendOrderEvents(t, es, "invoice.1", "invoice.1", "invoice.1")
+			reloaded, err := LoadModel(ctx, es, newCounter(), ordersConfig("order"))
+			is.NoErr(err)
+			is.Equal(counts(t, reloaded), map[string]int{"order.1": 1})
+		})
+	}
+}
+
+func TestSnapshotWatch_AbortedCatchUpLetsTheNextReaderWait(t *testing.T) {
+	is := testutil.NewIs(t)
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	state := &gatedCounter{Counts: map[string]int{}}
+	m, err := LoadModel(ctx, es, state, ordersConfig("order"))
+	is.NoErr(err)
+	appendOrderEvents(t, es, "order.1", "order.2")
+	state.entered, state.gate = make(chan struct{}, 1), make(chan struct{})
+
+	watchCtx, abort := context.WithCancel(ctx)
+	watchErr := make(chan error, 1)
+	go func() {
+		_, err := es.Watch(watchCtx, m)
+		watchErr <- err
+	}()
+	<-state.entered
+	abort()
+	is.Err(<-watchErr, context.Canceled)
+
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = es.Evolve(waitCtx, m)
+	is.Err(err, context.DeadlineExceeded)
+
+	close(state.gate)
+	_, err = es.Evolve(ctx, m)
+	is.NoErr(err)
+	is.NoErr(m.View(ctx, func(s *gatedCounter) error {
+		is.Equal(s.Counts, map[string]int{"order.1": 1, "order.2": 1})
+		return nil
+	}))
 }
 
 func publishUndecodable(t *testing.T, es *EventStore, entity string) {
@@ -482,9 +567,8 @@ func TestSnapshotLoad_RejectsTrimmedTail(t *testing.T) {
 	for _, tailEntity := range []string{"order.1", "user.1"} {
 		t.Run(tailEntity, func(t *testing.T) {
 			is := testutil.NewIs(t)
-			mgr, ctx := newTestManager(t)
-			es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "limited", MaxMsgs: 3})
-			is.NoErr(err)
+			ctx := context.Background()
+			es := newRetainedStore(t, 3)
 			cfg := ordersConfig("order")
 			appendOrderEvents(t, es, "order.1")
 			m, err := LoadModel(ctx, es, newCounter(), cfg)
@@ -523,9 +607,8 @@ func TestSnapshotLoad_EntityAheadOfCursorAppliesSkippedEvents(t *testing.T) {
 
 func TestSnapshotLoad_EmptyScopeOnTrimmedStreamStaysUsable(t *testing.T) {
 	is := testutil.NewIs(t)
-	mgr, ctx := newTestManager(t)
-	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "limited", MaxMsgs: 3})
-	is.NoErr(err)
+	ctx := context.Background()
+	es := newRetainedStore(t, 3)
 	appendOrderEvents(t, es, "user.1", "user.1", "user.1", "user.1", "user.1")
 	cfg := SnapshotConfig{Name: "invoices", Version: "1", Filters: []string{"invoice"}, Codec: codec.JSON}
 
@@ -1261,7 +1344,7 @@ func TestSnapshotSave_RefusesUnsafeModels(t *testing.T) {
 	es := newTestStore(t)
 	m, err := LoadModel(ctx, es, newCounter(), SnapshotConfig{Name: "orders", Codec: codec.JSON})
 	is.NoErr(err)
-	is.NoErr(m.Evolve(ctx, &Event{Entity: "order.1", sequence: 1}))
+	is.Err(m.Evolve(ctx, &Event{Entity: "order.1", sequence: 1}), ErrEvolvedOutsideStore)
 	is.Err(m.SaveSnapshot(ctx), ErrEvolvedOutsideStore)
 	is.Err(m.SaveSnapshot(ctx), ErrEvolveFailed)
 }

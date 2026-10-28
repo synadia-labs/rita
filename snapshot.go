@@ -88,7 +88,6 @@ func loadModel[T any](ctx context.Context, store *EventStore, initial T, config 
 	if _, err := store.Evolve(ctx, m); err != nil {
 		return nil, err
 	}
-	m.snap.cursor = max(m.snap.cursor, info.State.LastSeq)
 	return m, nil
 }
 
@@ -556,6 +555,13 @@ type snapshotEvolver interface {
 	evolveOrdered(context.Context, *Event) error
 	evolveDecision(context.Context, *Event) error
 	recordEvolveErr(error)
+	advanceCursor(uint64)
+}
+
+func (m *Model[T]) advanceCursor(seq uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.snap.cursor = max(m.snap.cursor, seq)
 }
 
 func (m *Model[T]) snapshotBinding() *snapshotBinding {
@@ -612,12 +618,20 @@ func (b *snapshotBinding) checkStore(s *EventStore) error {
 }
 
 type orderedPath struct {
-	evolve  func(context.Context, *Event) error
-	claim   *modelClaim
-	gen     uint64
-	model   snapshotEvolver
-	halted  atomic.Bool
-	stopped atomic.Bool
+	evolve    func(context.Context, *Event) error
+	claim     *modelClaim
+	gen       uint64
+	model     snapshotEvolver
+	streamEnd uint64
+	halted    atomic.Bool
+	stopped   atomic.Bool
+}
+
+func (p *orderedPath) caughtUp() {
+	if p.model == nil || p.halted.Load() {
+		return
+	}
+	p.model.advanceCursor(p.streamEnd)
 }
 
 func (p *orderedPath) checkHistory(info *jetstream.ConsumerInfo) error {
@@ -684,7 +698,20 @@ func (s *EventStore) orderedPath(ctx context.Context, model Evolver, o *options)
 		b.claim.release(gen)
 		return nil, err
 	}
-	return &orderedPath{evolve: sm.evolveOrdered, claim: &b.claim, gen: gen, model: sm}, nil
+	path := &orderedPath{evolve: sm.evolveOrdered, claim: &b.claim, gen: gen, model: sm}
+	if o.noWait {
+		return path, nil
+	}
+	info, err := b.streamInfo(ctx)
+	if err != nil {
+		b.claim.release(gen)
+		return nil, err
+	}
+	path.streamEnd = info.State.LastSeq
+	if o.stopSeq != nil {
+		path.streamEnd = min(path.streamEnd, *o.stopSeq)
+	}
+	return path, nil
 }
 
 type modelClaim struct {

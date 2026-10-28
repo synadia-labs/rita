@@ -157,6 +157,7 @@ func (m *Model[T]) Evolve(ctx context.Context, event *Event) error {
 	defer m.mu.Unlock()
 	if m.snap != nil {
 		m.recordEvolveErrLocked(ErrEvolvedOutsideStore)
+		return ErrEvolvedOutsideStore
 	}
 	return m.applyLocked(ctx, event)
 }

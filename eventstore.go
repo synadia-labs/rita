@@ -630,6 +630,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 
 	pending := info.NumPending
 	if pending == 0 {
+		path.caughtUp()
 		return 0, nil
 	}
 
@@ -694,6 +695,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		}
 	}
 
+	path.caughtUp()
 	return lastSeq, nil
 }
 
@@ -884,7 +886,9 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	// Wait for catch-up, but let the caller abort via ctx.
 	select {
 	case <-done:
+		path.caughtUp()
 	case <-ctx.Done():
+		path.stop()
 		wcancel()
 		conCtx.Stop()
 		return nil, ctx.Err()
