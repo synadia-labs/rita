@@ -2,6 +2,8 @@ package rita
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -44,6 +46,9 @@ var (
 		"order-canceled": {
 			Init: func() any { return &OrderCanceled{} },
 		},
+		"order-address-changed": {
+			Init: func() any { return &OrderAddressChanged{} },
+		},
 	}
 )
 
@@ -59,6 +64,10 @@ type OrderPlaced struct{}
 type OrderCanceled struct{}
 
 type OrderShipped struct{}
+
+type OrderAddressChanged struct {
+	Address string
+}
 
 // OrderStats is an example state that can evolve based on events.
 type OrderStats struct {
@@ -1046,4 +1055,203 @@ func TestEvolveReplayReappliesFailedEvent(t *testing.T) {
 	is.Equal(seq, uint64(2))
 	is.Equal(state.attempted[2], 2)
 	is.Equal(state.Count, 2)
+}
+
+var (
+	errUnknownOrderEvent  = errors.New("unknown order event")
+	errOrderCanceled      = errors.New("order was canceled")
+	errAddressServiceDown = errors.New("address service unavailable")
+)
+
+func releaseOneTypes() map[string]*types.Type {
+	reg := map[string]*types.Type{}
+	for name, typ := range registry {
+		if name != "order-canceled" {
+			reg[name] = typ
+		}
+	}
+	return reg
+}
+
+type OrderReleaseOne struct {
+	Address string
+}
+
+func (o *OrderReleaseOne) Evolve(ctx context.Context, event *Event) error {
+	switch e := event.Data.(type) {
+	case *OrderPlaced, *OrderShipped:
+	case *OrderAddressChanged:
+		o.Address = e.Address
+	default:
+		return fmt.Errorf("%w: %T", errUnknownOrderEvent, event.Data)
+	}
+	return nil
+}
+
+func (o *OrderReleaseOne) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
+	return []*Event{{Entity: "order.1", Data: &OrderShipped{}}}, nil
+}
+
+type OrderReleaseTwo struct {
+	OrderReleaseOne
+	Canceled bool
+}
+
+func (o *OrderReleaseTwo) Evolve(ctx context.Context, event *Event) error {
+	if _, ok := event.Data.(*OrderCanceled); ok {
+		o.Canceled = true
+		return nil
+	}
+	return o.OrderReleaseOne.Evolve(ctx, event)
+}
+
+func (o *OrderReleaseTwo) Decide(ctx context.Context, cmd *Command) ([]*Event, error) {
+	if o.Canceled {
+		return nil, errOrderCanceled
+	}
+	return o.OrderReleaseOne.Decide(ctx, cmd)
+}
+
+type OrderWithFlakyEvolve struct {
+	OrderReleaseTwo
+	failNext bool
+}
+
+func (o *OrderWithFlakyEvolve) Evolve(ctx context.Context, event *Event) error {
+	if o.failNext {
+		o.failNext = false
+		return errAddressServiceDown
+	}
+	return o.OrderReleaseTwo.Evolve(ctx, event)
+}
+
+type orderDeploy struct {
+	t  *testing.T
+	nc *nats.Conn
+}
+
+func newCanceledOrderDeploy(t *testing.T) *orderDeploy {
+	t.Helper()
+	srv := testutil.NewNatsServer(t)
+	t.Cleanup(func() { testutil.ShutdownNatsServer(srv) })
+
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+
+	d := &orderDeploy{t: t, nc: nc}
+	m, err := New(nc, WithRegistry(d.registry(registry)))
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	es, err := m.CreateEventStore(context.Background(), EventStoreConfig{Name: "orders"})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	_, err = es.Append(context.Background(), []*Event{
+		{Entity: "order.1", Data: &OrderPlaced{}},
+		{Entity: "order.1", Data: &OrderCanceled{}},
+		{Entity: "order.1", Data: &OrderAddressChanged{Address: "2 New St"}},
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	return d
+}
+
+func (d *orderDeploy) registry(reg map[string]*types.Type) *types.Registry {
+	d.t.Helper()
+	tr, err := types.NewRegistry(reg)
+	if err != nil {
+		d.t.Fatalf("registry: %v", err)
+	}
+	return tr
+}
+
+func (d *orderDeploy) store(reg map[string]*types.Type) *EventStore {
+	d.t.Helper()
+	m, err := New(d.nc, WithRegistry(d.registry(reg)))
+	if err != nil {
+		d.t.Fatalf("manager: %v", err)
+	}
+	es, err := m.GetEventStore(context.Background(), "orders")
+	if err != nil {
+		d.t.Fatalf("get store: %v", err)
+	}
+	return es
+}
+
+func watchModel(t *testing.T, es *EventStore, model Evolver) {
+	t.Helper()
+	w, err := es.Watch(context.Background(), model)
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	t.Cleanup(w.Stop)
+}
+
+func TestFailedEvolve_WatcherCannotDecodeNewEventType_RefusesDecide(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	deploy := newCanceledOrderDeploy(t)
+
+	releaseOne := deploy.store(releaseOneTypes())
+	stale := NewModel(&OrderReleaseOne{})
+	watchModel(t, releaseOne, stale)
+
+	is.Equal(stale.lseq["order.1"], uint64(3))
+	is.Err(stale.EvolveErr(), types.ErrTypeNotRegistered)
+
+	_, _, err := releaseOne.Decide(ctx, stale, &Command{Data: &ShipOrder{}})
+	is.Err(err, ErrEvolveFailed)
+	is.Err(err, types.ErrTypeNotRegistered)
+
+	rebuiltOnReleaseOne := NewModel(&OrderReleaseOne{})
+	watchModel(t, releaseOne, rebuiltOnReleaseOne)
+	is.Err(rebuiltOnReleaseOne.EvolveErr(), types.ErrTypeNotRegistered)
+
+	releaseTwo := deploy.store(registry)
+	rebuiltOnReleaseTwo := NewModel(&OrderReleaseTwo{})
+	watchModel(t, releaseTwo, rebuiltOnReleaseTwo)
+	is.NoErr(rebuiltOnReleaseTwo.EvolveErr())
+
+	_, _, err = releaseTwo.Decide(ctx, rebuiltOnReleaseTwo, &Command{Data: &ShipOrder{}})
+	is.Err(err, errOrderCanceled)
+}
+
+func TestFailedEvolve_ReplayCannotDecodeNewEventType_RefusesDecide(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	deploy := newCanceledOrderDeploy(t)
+
+	releaseOne := deploy.store(releaseOneTypes())
+	model := NewModel(&OrderReleaseOne{})
+	_, err := releaseOne.Evolve(ctx, model)
+	is.Err(err, types.ErrTypeNotRegistered)
+
+	_, _, err = releaseOne.Decide(ctx, model, &Command{Data: &ShipOrder{}})
+	is.Err(err, ErrEvolveFailed)
+	is.Err(err, types.ErrTypeNotRegistered)
+}
+
+func TestFailedEvolve_TemporaryEvolverError_RebuildRecovers(t *testing.T) {
+	is := testutil.NewIs(t)
+	ctx := context.Background()
+	deploy := newCanceledOrderDeploy(t)
+	releaseTwo := deploy.store(registry)
+
+	flaky := NewModel(&OrderWithFlakyEvolve{failNext: true})
+	_, err := releaseTwo.Evolve(ctx, flaky)
+	is.Err(err, errAddressServiceDown)
+	is.Err(flaky.EvolveErr(), errAddressServiceDown)
+
+	rebuilt := NewModel(&OrderWithFlakyEvolve{})
+	_, err = releaseTwo.Evolve(ctx, rebuilt)
+	is.NoErr(err)
+	is.NoErr(rebuilt.EvolveErr())
+
+	_, _, err = releaseTwo.Decide(ctx, rebuilt, &Command{Data: &ShipOrder{}})
+	is.Err(err, errOrderCanceled)
 }
