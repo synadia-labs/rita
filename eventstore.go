@@ -274,11 +274,14 @@ type Watcher interface {
 type watcher struct {
 	conCtx jetstream.ConsumeContext
 	cancel context.CancelFunc
+	path   *orderedPath
 }
 
 func (w *watcher) Stop() {
-	// Cancel first so any in-flight Evolve call observes the shutdown; then
-	// drain remaining buffered messages.
+	w.path.stop()
+	// Cancel first so any in-flight Evolve call on an ordinary model observes
+	// the shutdown; a snapshot-bound watcher lets it finish and skips the rest.
+	// Then drain remaining buffered messages.
 	w.cancel()
 	w.conCtx.Drain()
 }
@@ -528,6 +531,11 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 		return nil, 0, err
 	}
 
+	evolve, err := s.decisionEvolve(model)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	events, err := model.Decide(ctx, cmd)
 	if err != nil {
 		return nil, 0, err
@@ -539,7 +547,7 @@ func (s *EventStore) DecideAndEvolve(ctx context.Context, model DeciderEvolver, 
 	}
 
 	for _, ev := range events {
-		if err := model.Evolve(ctx, ev); err != nil {
+		if err := evolve(ctx, ev); err != nil {
 			return events, seq, err
 		}
 	}
@@ -599,6 +607,12 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		}
 	}
 
+	path, err := s.orderedPath(ctx, model, &o)
+	if err != nil {
+		return 0, err
+	}
+	defer path.release()
+
 	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
 		return 0, err
@@ -610,9 +624,13 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 	defer func() {
 		_ = s.js.DeleteConsumer(ctx, s.stream, info.Name)
 	}()
+	if err := path.checkHistory(info); err != nil {
+		return 0, err
+	}
 
 	pending := info.NumPending
 	if pending == 0 {
+		path.caughtUp()
 		return 0, nil
 	}
 
@@ -661,7 +679,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 			break
 		}
 
-		if err := model.Evolve(ctx, event); err != nil {
+		if err := path.evolve(ctx, event); err != nil {
 			return lastSeq, err
 		}
 		lastSeq = event.sequence
@@ -677,6 +695,7 @@ func (s *EventStore) Evolve(ctx context.Context, model Evolver, opts ...EvolveOp
 		}
 	}
 
+	path.caughtUp()
 	return lastSeq, nil
 }
 
@@ -781,6 +800,11 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 		}
 	}
 
+	path, err := s.orderedPath(ctx, model, &o)
+	if err != nil {
+		return nil, err
+	}
+
 	if o.errHandler == nil {
 		o.errHandler = func(err error, ev *Event, msg jetstream.Msg) {
 			s.logger.Error("watcher error", "error", err, "event", ev)
@@ -789,6 +813,12 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 
 	con, err := s.orderedConsumer(ctx, &o)
 	if err != nil {
+		path.release()
+		return nil, err
+	}
+	if err := path.checkHistory(con.CachedInfo()); err != nil {
+		_ = s.js.DeleteConsumer(ctx, s.stream, con.CachedInfo().Name)
+		path.release()
 		return nil, err
 	}
 
@@ -797,6 +827,7 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 	// WithoutCancel, a request-scoped ctx cancelled after Watch returns would
 	// silently feed cancelled contexts to every subsequent model.Evolve call.
 	wctx, wcancel := context.WithCancel(context.WithoutCancel(ctx))
+	evolveCtx := path.evolveContext(wctx)
 
 	// The number of messages to consume until we are caught up
 	// to the current known state.
@@ -822,31 +853,46 @@ func (s *EventStore) Watch(ctx context.Context, model Evolver, opts ...WatchOpti
 			}
 		}()
 
+		if path.skip() {
+			return
+		}
+
 		ev, err := s.unpackEvent(m)
 		if err != nil {
+			path.halt(fmt.Errorf("unpack event: %w", err))
 			recordEvolveFailure(model, err)
 			o.errHandler(fmt.Errorf("failed to unpack event: %w", err), nil, m)
 			return
 		}
 
-		if err := model.Evolve(wctx, ev); err != nil {
+		if err := path.evolve(evolveCtx, ev); err != nil {
+			path.halt(err)
 			o.errHandler(fmt.Errorf("failed to evolve event: %w", err), ev, m)
 			return
 		}
 	})
 	if err != nil {
 		wcancel()
+		path.release()
 		return nil, err
+	}
+	if path.claim != nil {
+		go func() {
+			<-conCtx.Closed()
+			path.release()
+		}()
 	}
 
 	// Wait for catch-up, but let the caller abort via ctx.
 	select {
 	case <-done:
+		path.caughtUp()
 	case <-ctx.Done():
+		path.stop()
 		wcancel()
 		conCtx.Stop()
 		return nil, ctx.Err()
 	}
 
-	return &watcher{conCtx: conCtx, cancel: wcancel}, nil
+	return &watcher{conCtx: conCtx, cancel: wcancel, path: path}, nil
 }

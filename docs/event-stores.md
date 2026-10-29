@@ -105,7 +105,79 @@ err := mgr.UpdateEventStore(ctx, rita.EventStoreConfig{
 err := mgr.DeleteEventStore(ctx, "orders")
 ```
 
-Deletes the stream and everything in it. This is irreversible.
+Deletes the stream and all its events. You cannot undo this. Rita does **not**
+delete the snapshot buckets. To delete them, call `DeleteSnapshots`:
+
+```go
+err := mgr.DeleteSnapshots(ctx, "orders")
+```
+
+If you create a store with the same name again, Rita does not use the old
+snapshots. `LoadModel` returns `ErrSnapshotStale`. To continue, change
+`Version` or call `DeleteSnapshots`.
+
+Also call `DeleteSnapshots` after you restore a store from a backup. Do not
+back up the snapshot buckets. Rita can make the snapshots again from the
+stream. A snapshot from a backup can be newer than the stream from the same
+backup, and then `LoadModel` returns `ErrSnapshotStale`.
+
+## Snapshot storage
+
+Each store keeps its snapshots in two buckets. `LoadModel` creates them if
+they do not exist:
+
+- **`ES_SNAP_DATA_<store name>`**, an Object Store, holds the snapshots
+  themselves. The server splits each one into chunks, so a snapshot can be
+  larger than the server's `max_payload`.
+- **`ES_SNAP_META_<store name>`**, a KV bucket, has one key for each snapshot
+  config. Its small value names the current snapshot and the one before it.
+
+The store name must contain only letters, digits, `-` and `_`. Other names
+cannot make valid bucket names, and `LoadModel` returns
+`ErrSnapshotConfigInvalid`.
+
+The new buckets use the same storage type and replica count as the stream.
+The KV bucket keeps one revision per key. Neither bucket has a TTL.
+`UpdateEventStore` does not change the buckets.
+
+Your credentials need these permissions:
+
+- Read the stream info.
+- Read and write the `KV_ES_SNAP_META_<store name>` and
+  `OBJ_ES_SNAP_DATA_<store name>` streams.
+- Read and write the `$KV.ES_SNAP_META_<store name>.>` and
+  `$O.ES_SNAP_DATA_<store name>.>` subjects.
+
+If your credentials cannot create buckets, create both before you start.
+
+A save uploads a new snapshot, then points the KV value at it. Rita keeps the
+current snapshot and the previous one, so a load that started before a save
+can still finish. If the KV write fails, Rita deletes the new snapshot. If the
+write times out, Rita reads the KV value back. If the write succeeded, Rita
+keeps the snapshot. If another save changed the KV value, Rita deletes the
+new snapshot. In all other cases Rita keeps it, because the write can still
+arrive. An unused snapshot can also stay if the process stops between the two
+steps. Rita does not remove these snapshots. Their names start with the KV key
+of their snapshot config.
+
+The KV key comes from `Name`, `Version`, `Filters` and `Codec`. If you change
+one of them, the model uses a new key. Rita does not remove the old key or its
+snapshots. Delete them when no service loads them.
+
+If an upload fails, the save fails and the previous snapshot stays.
+
+Snapshots do not make it safe to remove events from the stream. See
+[When a snapshot is rejected](./reading-state.md#when-a-snapshot-is-rejected).
+
+These errors mean that the code uses the API incorrectly:
+
+| Error | Cause |
+| --- | --- |
+| `ErrSnapshotConfigInvalid` | The state is nil or not a pointer, `Name` or `Codec` is missing, the codec has no name, or the store name is not valid. |
+| `ErrSnapshotNotConfigured` | You called `SaveSnapshot` on a model from `NewModel`. |
+| `ErrSnapshotWrongStore` | You used the model with a different store or tenant. |
+| `ErrSnapshotSkipsEvents` | A start sequence would skip events that the model did not apply. |
+| `ErrModelBusy` | Another `Evolve` or `Watch` already uses the model. |
 
 ## What you do with a store
 
@@ -117,6 +189,7 @@ Once you hold an `*EventStore`, the rest of Rita's API hangs off it:
 | `Decide` / `DecideAndEvolve` | [Deciders & evolvers](./deciders-and-evolvers.md) |
 | `Evolve` state on demand | [Reading state](./reading-state.md#evolve) |
 | `Watch` events live | [Reading state](./reading-state.md#watch) |
+| `LoadModel` / `SaveSnapshot` | [Snapshots](./reading-state.md#snapshots) |
 | Reactor management (`CreateReactor`, …) | [Reactors](./reactors.md) |
 | `Tenant` scoping | [Multi-tenancy](./tenancy.md) |
 

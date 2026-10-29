@@ -1,6 +1,6 @@
 # Reading State
 
-State in an event-sourced system is derived, not stored. Rita gives you two ways
+State in an event-sourced system is derived from events. Rita gives you two ways
 to derive it from the log:
 
 - **`Evolve`** — replay events once, on demand, to build state up to *now*.
@@ -88,6 +88,118 @@ you provide). When you need **durable, at-least-once** processing for side
 effects that must not be lost across restarts, use a
 [reactor](./reactors.md) instead.
 
+## Snapshots
+
+A snapshot keeps a copy of a model's state outside the event stream. When you
+load the model again, Rita only replays the events after the snapshot.
+Snapshots are optional. `NewModel` does not use them.
+
+```go
+model, err := rita.LoadModel(ctx, es, &Order{}, rita.SnapshotConfig{
+	Name:    "order-1001",
+	Version: "v1",
+	Filters: []string{"order.1001"},
+	Codec:   codec.JSON,
+})
+if err != nil {
+	return err
+}
+
+if err := model.SaveSnapshot(ctx); err != nil {
+	return err
+}
+```
+
+- **Set a codec.** The codec encodes your state. It does not encode events.
+  JSON and MsgPack do not save unexported fields. To save them, use
+  `codec.Binary` with `MarshalBinary` and `UnmarshalBinary`.
+- **Give `LoadModel` new, empty state.** Do not change that pointer after
+  the call. Use `View` to read the state.
+- **Change `Version`** when you change the state fields or the `Evolve` logic.
+  Rita then ignores the old snapshot and replays all events.
+
+### Where snapshots are stored
+
+Snapshots live in an Object Store beside the stream, so a snapshot can be
+larger than the server's maximum message size. See
+[Snapshot storage](./event-stores.md#snapshot-storage) for the bucket names,
+permissions, and which snapshots Rita keeps.
+
+`LoadModel` gives each snapshot download attempt 30 seconds when `ctx` has
+no deadline. If a save replaces the snapshot during a download, Rita tries
+again. It makes up to three attempts. A deadline on `ctx` limits the whole
+load, including all attempts. For a large snapshot, pass a `ctx` with a longer
+deadline.
+
+### What to snapshot
+
+Use a snapshot when a model gets many events but its state stays a size you
+can hold in memory. Each save encodes the whole state, and each load reads
+the whole snapshot into memory.
+
+A model that watches the whole store also keeps a sequence for every entity
+it sees, even for events it ignores. The snapshot stores these sequences too.
+Set `Filters` to keep that list to the model's own entities.
+
+Do not use a snapshot for:
+
+- **State that grows without limit**, such as a full history. Use a
+  [reactor](./reactors.md) that writes one KV key for each entity.
+- **Secrets or data you must be able to erase.** A snapshot is a second copy
+  of the persisted state, outside the stream, and Rita does not encrypt it.
+
+If a save fails, the previous snapshot stays. `LoadModel` then replays more
+events at each start.
+
+### Keep a snapshot current
+
+`DecideAndEvolve` changes the state, but it does not move the snapshot
+position. Call `es.Evolve` before you save:
+
+```go
+if _, err := es.Evolve(ctx, model); err != nil {
+	return err
+}
+if err := model.SaveSnapshot(ctx); err != nil {
+	return err
+}
+```
+
+`es.Watch(ctx, model)` also moves the position, and it uses the saved
+filters. Run only one `Evolve` or `Watch` at a time on a model. At shutdown,
+stop the watch before you save.
+
+`es.Evolve` and the catch-up of `es.Watch` move the position to the end of
+the stream, also past events that your filters do not match. After the
+catch-up, a watch moves the position only for events that your filters match.
+If the stream has retention limits and your entities get few events, call
+`es.Evolve` before you save. Then retention of other events cannot cause
+`ErrSnapshotHistoryGap`.
+
+Rita does not save snapshots automatically. Your application calls
+`SaveSnapshot`. If the stored snapshot is the same or newer, the save does
+nothing. If two writers save at the same time, one gets `ErrSnapshotConflict`.
+Try the save again.
+
+### When a snapshot is rejected
+
+If there is no snapshot, Rita replays all events. In all other cases, a
+problem with the snapshot returns an error:
+
+| Error | Cause |
+| --- | --- |
+| `ErrSnapshotInvalid` | Rita cannot decode the stored snapshot, or the snapshot it names is missing. |
+| `ErrSnapshotStale` | Someone deleted and created the stream again, or the stream is behind the snapshot. Change `Version` or call `DeleteSnapshots`. |
+| `ErrSnapshotHistoryGap` | Retention or a purge removed events after the snapshot. This applies to all events in the stream, not only the model's filters. |
+| `ErrSnapshotScopeChanged` | You gave `Evolve` or `Watch` different filters. |
+| `ErrEvolvedOutsideStore` | You called `model.Evolve` directly. Use `es.Evolve` or `es.Watch`. |
+
+If `Evolve` fails, or a watch cannot apply an event, the model stops. It
+cannot decide or save, and `EvolveErr` returns the failure. Load a new model.
+See [failed evolves](./deciders-and-evolvers.md#failed-evolves).
+
+> **Full runnable example:** [`examples/snapshots/main.go`](../examples/snapshots/main.go)
+
 ## Filters
 
 Both `Evolve` and `Watch` accept `WithFilters(patterns...)`. A pattern matches
@@ -117,18 +229,18 @@ also applies to `Watch`):
 | `WithAfterSequence(seq)` | Start *after* `seq` — replay only events newer than one you've already applied. |
 | `WithStopSequence(seq)` | Stop *at* `seq` — replay no further than that point. |
 
-`WithAfterSequence` is how you resume cheaply. If you persist a model's state
-alongside the last sequence it reflects (a snapshot), you can rebuild by loading
-the snapshot and replaying only what came after:
+`WithAfterSequence` resumes replay when you already have matching state and
+sequence metadata:
 
 ```go
-// state + lastSeq were restored from a snapshot
+// state already reflects events through lastSeq
 _, err := es.Evolve(ctx, &state, rita.WithAfterSequence(lastSeq))
 ```
 
-It is also the documented recovery path when
-[`DecideAndEvolve` fails mid-evolve](./deciders-and-evolvers.md#decideandevolve):
-replay from the last sequence the model successfully applied.
+Do not use this to restore a `Model` from your own saved state. The model
+also needs its entity sequences, and only [`LoadModel`](#snapshots) restores
+them. After a failed `Evolve`, see
+[failed evolves](./deciders-and-evolvers.md#failed-evolves).
 
 `WithStopSequence` lets you reconstruct historical state — what the entity looked
 like as of a particular point in the log — which is useful for debugging,

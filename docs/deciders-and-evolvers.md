@@ -139,7 +139,8 @@ step.
 > **Partial-failure note.** If the evolve step fails after the append, the
 > stream has the events, but the model does not. The model then refuses
 > every later `Decide`. See [failed evolves](#failed-evolves). To continue,
-> build a new model and replay it.
+> build a new model and replay it. A model from `LoadModel` also refuses
+> `SaveSnapshot`. Load it again.
 
 ## Model
 
@@ -175,6 +176,9 @@ err := model.View(ctx, func(o *Order) error {
 `NewModel` detects which interfaces the wrapped type implements; calling a method
 the type doesn't support returns `ErrDeciderNotImplemented` or
 `ErrEvolverNotImplemented`.
+
+`NewModel` keeps state in memory only. To keep state between restarts, use
+[`LoadModel` and `SaveSnapshot`](./reading-state.md#snapshots).
 
 ### Failed evolves
 
