@@ -189,7 +189,7 @@ problem with the snapshot returns an error:
 | Error | Cause |
 | --- | --- |
 | `ErrSnapshotInvalid` | Rita cannot decode the stored snapshot, or the snapshot it names is missing. |
-| `ErrSnapshotStale` | Someone deleted and created the stream again, or the stream is behind the snapshot. Change `Version`. |
+| `ErrSnapshotStale` | Someone deleted and created the stream again, or the stream is behind the snapshot. Change `Version` or call `DeleteSnapshots`. |
 | `ErrSnapshotHistoryGap` | Retention or a purge removed events after the snapshot. This applies to all events in the stream, not only the model's filters. |
 | `ErrSnapshotScopeChanged` | You gave `Evolve` or `Watch` different filters. |
 | `ErrEvolvedOutsideStore` | You called `model.Evolve` directly. Use `es.Evolve` or `es.Watch`. |

@@ -189,6 +189,20 @@ func snapshotBuckets(storeName string) (manifests, objects string, err error) {
 	return manifests, "ES_SNAP_DATA_" + storeName, nil
 }
 
+func (m *Manager) DeleteSnapshots(ctx context.Context, storeName string) error {
+	manifests, objects, err := snapshotBuckets(storeName)
+	if err != nil {
+		return err
+	}
+	if err := m.js.DeleteKeyValue(ctx, manifests); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) {
+		return fmt.Errorf("delete snapshot bucket: %w", err)
+	}
+	if err := m.js.DeleteObjectStore(ctx, objects); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) {
+		return fmt.Errorf("delete snapshot data bucket: %w", err)
+	}
+	return nil
+}
+
 func (b *snapshotBinding) open(ctx context.Context) error {
 	if err := b.store.requireTenant(); err != nil {
 		return err
@@ -263,7 +277,7 @@ func (b *snapshotBinding) read(ctx context.Context) (*snapshotManifest, *jetstre
 		return nil, nil, 0, fmt.Errorf("%w: stored value names no snapshot object", ErrSnapshotInvalid)
 	}
 	if staleAgainst(info, manifest.Created, manifest.Cursor) {
-		return nil, nil, 0, ErrSnapshotStale
+		return nil, nil, 0, b.staleErr()
 	}
 	return &manifest, info, entry.Revision(), nil
 }
@@ -343,7 +357,7 @@ func (b *snapshotBinding) fetch(ctx context.Context, info *jetstream.StreamInfo,
 			return nil, fmt.Errorf("%w: entity %q is not valid", ErrSnapshotInvalid, entity)
 		}
 		if seq > info.State.LastSeq {
-			return nil, ErrSnapshotStale
+			return nil, b.staleErr()
 		}
 	}
 	return env, nil
@@ -384,7 +398,7 @@ func (m *Model[T]) SaveSnapshot(ctx context.Context) error {
 		return err
 	}
 	if staleAgainst(info, b.created, cursor) {
-		return ErrSnapshotStale
+		return b.staleErr()
 	}
 	previous, _, revision, err := b.read(ctx)
 	if err != nil {
@@ -415,6 +429,11 @@ func (m *Model[T]) savableCursor() (uint64, error) {
 
 func staleAgainst(info *jetstream.StreamInfo, created time.Time, cursor uint64) bool {
 	return !created.Equal(info.Created) || cursor > info.State.LastSeq
+}
+
+func (b *snapshotBinding) staleErr() error {
+	return fmt.Errorf("%w: stream %q was recreated or is behind the snapshot; change Version or call DeleteSnapshots(%q)",
+		ErrSnapshotStale, b.store.stream, b.store.name)
 }
 
 func (b *snapshotBinding) upload(ctx context.Context, candidate snapshotEnvelope) (snapshotManifest, error) {
@@ -499,7 +518,7 @@ func (b *snapshotBinding) publish(ctx context.Context, next snapshotManifest, re
 	}
 	if staleAgainst(info, next.Created, next.Cursor) {
 		b.retire(ctx, next.Current)
-		return ErrSnapshotStale
+		return b.staleErr()
 	}
 	if previous != nil {
 		next.Previous = previous.Current

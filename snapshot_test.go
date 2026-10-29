@@ -1431,6 +1431,37 @@ func TestSnapshotSave_StateLargerThanMaxPayloadRoundTrips(t *testing.T) {
 	}))
 }
 
+func TestDeleteSnapshots_RecreatedStoreLoadsAgain(t *testing.T) {
+	is := testutil.NewIs(t)
+	mgr, ctx := newTestManager(t)
+	es, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "recreated"})
+	is.NoErr(err)
+	cfg := SnapshotConfig{Name: "orders", Codec: codec.JSON}
+	appendOrderEvents(t, es, "order.1")
+	m, err := LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+	is.NoErr(m.SaveSnapshot(ctx))
+	is.NoErr(mgr.DeleteEventStore(ctx, "recreated"))
+	es, err = mgr.CreateEventStore(ctx, EventStoreConfig{Name: "recreated"})
+	is.NoErr(err)
+
+	_, err = LoadModel(ctx, es, newCounter(), cfg)
+	is.Err(err, ErrSnapshotStale)
+	is.True(strings.Contains(err.Error(), `DeleteSnapshots("recreated")`))
+
+	is.NoErr(mgr.DeleteSnapshots(ctx, "recreated"))
+	_, err = LoadModel(ctx, es, newCounter(), cfg)
+	is.NoErr(err)
+}
+
+func TestDeleteSnapshots_StoreWithoutSnapshotsIsNoop(t *testing.T) {
+	is := testutil.NewIs(t)
+	mgr, ctx := newTestManager(t)
+	_, err := mgr.CreateEventStore(ctx, EventStoreConfig{Name: "plain"})
+	is.NoErr(err)
+	is.NoErr(mgr.DeleteSnapshots(ctx, "plain"))
+}
+
 func TestSnapshotLoad_RecreatedStreamIsStale(t *testing.T) {
 	is := testutil.NewIs(t)
 	mgr, ctx := newTestManager(t)

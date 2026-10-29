@@ -106,11 +106,20 @@ err := mgr.DeleteEventStore(ctx, "orders")
 ```
 
 Deletes the stream and all its events. You cannot undo this. Rita does **not**
-delete the snapshot buckets. Delete them yourself if you do not need them.
+delete the snapshot buckets. To delete them, call `DeleteSnapshots`:
+
+```go
+err := mgr.DeleteSnapshots(ctx, "orders")
+```
 
 If you create a store with the same name again, Rita does not use the old
 snapshots. `LoadModel` returns `ErrSnapshotStale`. To continue, change
-`Version` or delete the snapshot buckets.
+`Version` or call `DeleteSnapshots`.
+
+Also call `DeleteSnapshots` after you restore a store from a backup. Do not
+back up the snapshot buckets. Rita can make the snapshots again from the
+stream. A snapshot from a backup can be newer than the stream from the same
+backup, and then `LoadModel` returns `ErrSnapshotStale`.
 
 ## Snapshot storage
 
